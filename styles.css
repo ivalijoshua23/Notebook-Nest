@@ -1,0 +1,287 @@
+/* --- GLOBAL THEME --- */
+html, body {
+    background-color: #37383B !important;
+}
+
+/* --- HIDDEN ITEMS (in folders) --- */
+.plugin-hidden-native {
+    display: none !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+}
+
+/* --- CONTAINERS --- */
+.plugin-container {
+    display: block;
+    margin-bottom: 12px;
+    font-family: 'Google Sans', Roboto, sans-serif;
+    border-bottom: 1px solid #5f6368;
+    padding-bottom: 8px;
+}
+
+.plugin-controls-area {
+    padding: 8px 0;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+/* --- TOOLBAR BUTTONS --- */
+.plugin-btn {
+    background-color: transparent; 
+    color: #8ab4f8; 
+    border: 1px solid transparent;
+    padding: 4px; 
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    transition: background 0.2s, color 0.2s;
+}
+
+.plugin-btn:hover { 
+    background-color: rgba(138, 180, 248, 0.1); 
+    color: #aecbfa;
+}
+
+.plugin-btn.secondary {
+    color: #e8eaed;
+}
+.plugin-btn.secondary:hover { 
+    background-color: rgba(232, 234, 237, 0.1);
+    color: #fff;
+}
+
+/* Toggle button "off" state - dimmed appearance */
+.plugin-btn.toggle-off {
+    opacity: 0.5;
+}
+.plugin-btn.toggle-off:hover {
+    opacity: 0.8;
+}
+
+/* --- SEARCH --- */
+.plugin-search-area input {
+    width: 100%;
+    padding: 6px 8px;
+    border-radius: 4px;
+    border: 1px solid #5f6368;
+    background: #202124;
+    color: #e8eaed;
+    outline: none;
+    margin-bottom: 8px;
+    box-sizing: border-box;
+    font-size: 13px;
+}
+
+/* --- TREE NODES --- */
+.plugin-tree-node {
+    border-left: 1px solid #454649;
+    margin-left: 8px;
+}
+
+.plugin-container > #tree-mount-source > .plugin-tree-node,
+.plugin-container > #tree-mount-studio > .plugin-tree-node {
+    margin-left: 0;
+    border-left: none;
+}
+
+.plugin-folder-header {
+    display: flex;
+    align-items: center;
+    padding: 6px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    color: #e8eaed;
+    font-size: 14px;
+    user-select: none;
+    transition: background 0.1s;
+}
+
+.plugin-folder-header:hover {
+    background-color: #454649;
+}
+
+.plugin-folder-header .arrow {
+    font-size: 10px;
+    margin-right: 6px;
+    color: #9aa0a6;
+    transition: transform 0.2s;
+    display: inline-block;
+    width: 12px;
+    text-align: center;
+}
+
+.plugin-tree-node.open > .plugin-folder-header .arrow {
+    transform: rotate(90deg);
+}
+
+.folder-icon { margin-right: 6px; }
+.folder-name { flex-grow: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* --- FOLDER ACTIONS --- */
+.folder-actions {
+    display: flex;
+    gap: 2px;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+.plugin-folder-header:hover .folder-actions { opacity: 1; }
+
+.action-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 3px;
+    color: #9aa0a6;
+    cursor: pointer;
+}
+
+.action-icon:hover {
+    background: rgba(138, 180, 248, 0.2);
+    color: #8ab4f8;
+}
+
+/* --- PINNED SECTION --- */
+.plugin-pinned-section {
+    border-bottom: 1px solid #5f6368;
+    padding-bottom: 8px;
+    margin-bottom: 8px;
+    background: #28292a;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.plugin-pinned-section .plugin-proxy-item {
+    background: #28292a;
+    border-bottom: 1px solid #3c4043;
+}
+
+.plugin-pinned-section .plugin-proxy-item:last-child {
+    border-bottom: none;
+}
+
+.is-pinned-proxy {
+    background-color: rgba(138, 180, 248, 0.08) !important; 
+}
+
+/* --- CHILDREN CONTAINER --- */
+.plugin-node-children {
+    display: none;
+}
+.plugin-tree-node.open > .plugin-node-children {
+    display: block;
+}
+
+/* --- PROXY ITEMS (FIXED) --- */
+.plugin-proxy-item {
+    /* REMOVED !important TO ALLOW JS FILTERING */
+    display: flex; 
+    align-items: center;
+    padding: 3px 6px 3px 16px; 
+    border-bottom: 1px solid #3c4043;
+    cursor: pointer;
+    color: #e8eaed;
+    font-size: 14px;
+    background: #37383B;
+    min-height: 30px; 
+}
+
+.plugin-proxy-item:hover {
+    background-color: #454649;
+}
+
+.proxy-content {
+    display: flex;
+    align-items: center;
+    flex-grow: 1;
+    overflow: hidden;
+}
+
+.proxy-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+.plugin-proxy-item:hover .proxy-actions {
+    opacity: 1;
+}
+
+.proxy-icon {
+    margin-right: 10px;
+    display: flex;
+    align-items: center;
+    color: #8ab4f8;
+}
+
+.proxy-text {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* --- MOVE/PIN TRIGGER --- */
+.plugin-move-trigger, .pin-btn {
+    cursor: pointer;
+    margin-right: 2px; 
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    color: #9aa0a6; 
+    transition: background 0.2s, color 0.2s, opacity 0.2s;
+}
+
+.plugin-move-trigger:hover, .pin-btn:hover {
+    background-color: rgba(138, 180, 248, 0.1); 
+    color: #8ab4f8; 
+}
+
+/* --- VISIBILITY RULES --- */
+.plugin-detected-row:hover .plugin-move-trigger,
+.plugin-proxy-item:hover .plugin-move-trigger {
+    opacity: 1;
+}
+
+.plugin-move-trigger.active {
+    opacity: 1;
+    color: #8ab4f8;
+}
+
+/* --- DROPDOWN MENU --- */
+.plugin-dropdown {
+    position: absolute;
+    background: #2d2e30;
+    border: 1px solid #5f6368;
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    z-index: 10001; 
+    max-height: 300px;
+    overflow-y: auto;
+    width: 240px;
+    padding: 4px 0;
+}
+
+.plugin-dropdown-item {
+    padding: 8px 12px;
+    font-size: 13px;
+    color: #e8eaed;
+    cursor: pointer;
+    border-bottom: 1px solid #3c4043;
+    display: flex;
+    align-items: center;
+}
+.plugin-dropdown-item:hover {
+    background-color: #454649;
+}

@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "NotebookLM Pro Tree",
+  "version": "14.2",
+  "description": "Tree-structured folder organization for NotebookLM. Organize sources and studio notes into nested folders with deep content search, pinning, and color-coding. Each notebook has its own independent folder structure.",
+  "author": "Benju66",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": [
+    "https://notebooklm.google.com/*",
+    "https://gist.githubusercontent.com/*"
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://notebooklm.google.com/*"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_start"
+    }
+  ]
+}
