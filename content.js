@@ -1,53 +1,276 @@
 /**
- * NotebookLM Pro Tree - V14.2 (Expand/Collapse All)
+ * NotebookLM Pro Tree - V17.5 (Local Storage Infrastructure)
  * Author: Benju66
+ * NOTE: Version is now read from manifest.json only - single source of truth
  * 
- * Features:
- * 1. Normalized Keys & Robust Selectors
- * 2. Polling Indexer
- * 3. Remote Configuration
- * 4. Storage Safety Limits (Truncation)
- * 5. Smart Toast (Silent when typing, Visible when viewing)
- * 6. Export/Import Folder Structures
- * 7. Per-Notebook Folder Storage (each notebook has its own folders)
- * 8. Anti-flicker CSS (smooth loading)
- * 9. Consistent toggle button icons
- * 10. Expand/Collapse All Folders
+ * V17.5 Changes:
+ * - Switched to local-only storage (unlimitedStorage permission)
+ * - Automatic migration from sync storage for existing users
+ * - Removed 100KB sync storage limitation
+ * - Simplified storage architecture for future features (links/tags)
+ * - Cleaner codebase with single storage path
+ * 
+ * V17.4 Changes:
+ * - Version now reads from manifest.json (no more manual sync needed)
+ * - Added custom styled confirmation modals (replaces native confirm())
+ * - Added search index size limit (2MB) with LRU eviction
+ * - Added race condition guard for processItems()
+ * - Improved memory management for large notebooks
+ * 
+ * V17.3 Changes:
+ * - Added "Select All/Deselect All" button to source panel
+ * - Added checkboxes to individual tree items (synced with native state)
+ * - Added bulk-select checkboxes to folders
+ * - Fixed native checkbox synchronization
  */
 
 // --- CONFIGURATION ---
-const REMOTE_CONFIG_URL = "https://gist.githubusercontent.com/benju66/7635f09ea87f81c890f9b736b22d9ac4/raw/09232a0ceb72a14b456bcd239b4e35b7f19c033f/notebooklm-selectors.json"; 
+const REMOTE_CONFIG_URL = "https://gist.githubusercontent.com/benju66/7635f09ea87f81c890f9b736b22d9ac4/raw/09232a0ceb72a14b456bcd239b4e35b7f19c033f/notebooklm-selectors.json";
 
+// --- VERSION HELPER (Single source of truth: manifest.json) ---
+function getExtensionVersion() {
+    try {
+        if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getManifest) {
+            return chrome.runtime.getManifest().version;
+        }
+    } catch (e) { }
+    return 'unknown';
+} 
+
+// --- NAMED CONSTANTS ---
+const DEBOUNCE_ORGANIZER_MS = 250;
+const DEBOUNCE_INDEX_MS = 1000;
+const DEBOUNCE_SEARCH_MS = 300;
+const URL_CHECK_INTERVAL_MS = 1000;
+const INIT_DELAY_MS = 500;
+const DOM_SETTLE_DELAY_MS = 50;
+const MAX_INDEX_CONTENT_LENGTH = 20000;
+const MAX_INDEX_SIZE_BYTES = 2 * 1024 * 1024; // 2MB limit for search index
+const FUZZY_MATCH_THRESHOLD = 0.65;
+const FOLDER_NAME_MATCH_THRESHOLD = 0.70;
+const TOAST_DISPLAY_MS = 2500;
+const TOAST_FADE_MS = 300;
+const CONFIG_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const HEALTH_CHECK_INTERVAL_MS = 30000; // Check selector health every 30s
+const SELECTOR_FAILURE_THRESHOLD = 3; // Warn after this many selector types fail
+
+// --- DEFAULT SELECTORS (Arrays for fallback chain) ---
 const DEFAULT_SELECTORS = {
-    sourceRow: '.single-source-container',
-    studioRow: 'artifact-library-note',
-    sourceTitle: '.source-title, [aria-label="Source title"]',
-    studioTitle: '.artifact-title, .title, h3',
-    activeNoteTitle: [
-        'input[aria-label="note title editable"]', 
-        '.note-header__editable-title',
-        'textarea[aria-label="Title"]', 
-        'input[aria-label="Title"]', 
-        '.title-input'
+    sourceRow: [
+        '.single-source-container',
+        '[data-source-id]',
+        '.source-item',
+        'div[role="listitem"]:has(mat-checkbox)',
+        '.source-list-item'
     ],
-    activeNoteBody: ['.ql-editor', '.ProseMirror', '[contenteditable="true"]', '.note-body', 'textarea[placeholder*="Write"]']
+    studioRow: [
+        'artifact-library-note',
+        'mat-card[class*="artifact"]',
+        '.studio-note-item',
+        '.artifact-item',
+        '[data-note-id]'
+    ],
+    sourceTitle: [
+        '.source-title',
+        '[aria-label="Source title"]',
+        '.source-name',
+        '.title-text'
+    ],
+    studioTitle: [
+        '.artifact-title',
+        '.title',
+        'h3',
+        '.note-title'
+    ],
+    activeNoteTitle: [
+        'input[aria-label="note title editable"]',
+        '.note-header__editable-title',
+        'textarea[aria-label="Title"]',
+        'input[aria-label="Title"]',
+        '.title-input',
+        '[contenteditable="true"][class*="title"]'
+    ],
+    activeNoteBody: [
+        '.ql-editor',
+        '.ProseMirror',
+        '[contenteditable="true"]',
+        '.note-body',
+        'textarea[placeholder*="Write"]',
+        '.editor-content'
+    ],
+    // Additional selectors for landmark detection
+    sourcePanel: [
+        '.source-panel',
+        'section[class*="source"]',
+        '[data-panel="source"]'
+    ],
+    studioPanel: [
+        '.studio-panel',
+        'section[class*="studio"]',
+        '[data-panel="studio"]'
+    ],
+    chatPanel: [
+        '.chat-panel',
+        'section[class*="chat"]',
+        '[data-panel="chat"]'
+    ],
+    generatorBox: [
+        '.create-artifact-buttons-container',
+        'studio-panel .actions-container',
+        '.artifact-generators'
+    ]
 };
 
-let activeSelectors = { ...DEFAULT_SELECTORS };
+let activeSelectors = JSON.parse(JSON.stringify(DEFAULT_SELECTORS));
 
 // --- STATE ---
 const DEFAULT_STATE = {
-    source: { folders: {}, mappings: {}, pinned: [] }, 
+    source: { folders: {}, mappings: {}, pinned: [], tasks: [] },
     studio: { folders: {}, mappings: {}, pinned: [] },
-    settings: { showGenerators: true, showResearch: true }
+    settings: { showGenerators: true, showResearch: true, focusMode: false, tasksOpen: true, completedOpen: false }
 };
 
 let appState = JSON.parse(JSON.stringify(DEFAULT_STATE));
 let currentNotebookId = null;
-let debounceTimer = null;
-let indexDebounce = null;
-let searchIndex = {}; 
+let searchIndex = {};
+let searchIndexAccessTimes = {}; // LRU tracking for search index eviction
 let urlCheckInterval = null;
+let mainObserver = null;
+let healthCheckInterval = null;
+let lastHealthStatus = null;
+let isProcessingItems = false; // Race condition guard for processItems
+
+// --- UTILITY: DEBOUNCE ---
+function debounce(fn, delay) {
+    let timer = null;
+    return (...args) => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+            timer = null;
+            fn(...args);
+        }, delay);
+    };
+}
+
+// Create debounced versions of frequently-called functions
+const debouncedRunOrganizer = debounce(() => safeRunOrganizer(), DEBOUNCE_ORGANIZER_MS);
+const debouncedIndexNote = debounce(() => safeDetectAndIndexActiveNote(), DEBOUNCE_INDEX_MS);
+
+// --- CUSTOM MODAL SYSTEM ---
+function showConfirmModal(message, onConfirm, onCancel) {
+    // Remove any existing modal
+    const existing = document.getElementById('plugin-confirm-modal');
+    if (existing) existing.remove();
+    
+    const overlay = document.createElement('div');
+    overlay.id = 'plugin-confirm-modal';
+    overlay.className = 'plugin-modal-overlay';
+    overlay.innerHTML = `
+        <div class="plugin-modal-content">
+            <div class="plugin-modal-message">${message}</div>
+            <div class="plugin-modal-buttons">
+                <button class="plugin-modal-btn cancel">Cancel</button>
+                <button class="plugin-modal-btn confirm">Confirm</button>
+            </div>
+        </div>
+    `;
+    
+    const closeModal = () => overlay.remove();
+    
+    overlay.querySelector('.plugin-modal-btn.cancel').onclick = () => {
+        closeModal();
+        if (onCancel) onCancel();
+    };
+    
+    overlay.querySelector('.plugin-modal-btn.confirm').onclick = () => {
+        closeModal();
+        if (onConfirm) onConfirm();
+    };
+    
+    // Close on overlay click (not content)
+    overlay.onclick = (e) => {
+        if (e.target === overlay) {
+            closeModal();
+            if (onCancel) onCancel();
+        }
+    };
+    
+    // Close on Escape key
+    const escHandler = (e) => {
+        if (e.key === 'Escape') {
+            closeModal();
+            if (onCancel) onCancel();
+            document.removeEventListener('keydown', escHandler);
+        }
+    };
+    document.addEventListener('keydown', escHandler);
+    
+    document.body.appendChild(overlay);
+    overlay.querySelector('.plugin-modal-btn.confirm').focus();
+}
+
+// --- UTILITY: SAFE QUERY HELPERS ---
+function safeQuery(parent, selector) {
+    try {
+        if (!parent) return null;
+        if (Array.isArray(selector)) {
+            for (const sel of selector) {
+                const el = parent.querySelector(sel);
+                if (el) return el;
+            }
+            return null;
+        }
+        return parent.querySelector(selector);
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Query failed:', selector, e.message);
+        return null;
+    }
+}
+
+function safeQueryAll(parent, selector) {
+    try {
+        if (!parent) return [];
+        if (Array.isArray(selector)) {
+            for (const sel of selector) {
+                const els = parent.querySelectorAll(sel);
+                if (els.length > 0) return els;
+            }
+            return [];
+        }
+        return parent.querySelectorAll(selector) || [];
+    } catch (e) {
+        console.debug('[NotebookLM Tree] QueryAll failed:', selector, e.message);
+        return [];
+    }
+}
+
+function safeGetText(element) {
+    try {
+        if (!element) return '';
+        return (element.innerText || element.textContent || element.value || '').trim();
+    } catch (e) {
+        return '';
+    }
+}
+
+function safeHasClass(element, className) {
+    try {
+        return element?.classList?.contains(className) ?? false;
+    } catch (e) {
+        return false;
+    }
+}
+
+function safeClick(element) {
+    try {
+        if (!element) return false;
+        element.click();
+        return true;
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Click failed:', e.message);
+        return false;
+    }
+}
 
 // --- ICONS ---
 const ICONS = {
@@ -55,11 +278,9 @@ const ICONS = {
     newFolder: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="currentColor"><path d="M560-320h80v-80h80v-80h-80v-80h-80v80h-80v80h80v80ZM160-160q-33 0-56.5-23.5T80-240v-480q0-33 23.5-56.5T160-800h240l80 80h320q33 0 56.5 23.5T880-640v400q0 33-23.5 56.5T800-160H160Zm0-80h640v-400H447l-80-80H160v480Zm0 0v-480 480Z"/></svg>',
     restart: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="currentColor"><path d="M480-160q-134 0-227-93t-93-227q0-134 93-227t227-93q69 0 132 28.5T720-690v-110h80v240H560v-80h135q-31-40-74.5-65T540-730q-100 0-170 70t-70 170q0 100 70 170t170 70q77 0 139-44t87-116h84q-28 106-114 173t-196 67Z"/></svg>',
     tune: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="currentColor"><path d="M440-120v-240h80v80h320v80H520v80h-80Zm-320-80v-80h240v80H120Zm160-200v-80H120v-80h160v-80h80v240h-80Zm160-80v-80h400v80H440Zm160-200v-240h80v80h160v80H680v80h-80Zm-480-80v-80h400v80H120Z"/></svg>',
-    tuneOff: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="currentColor"><path d="M792-56 676-172H520v-80h160v-23l-80-80v-45h80v80h56l-63-63-56 56v-250h-80v80H280v-80h-80v240h80v-80h23l-80-80H120v-80h160v-80h11l-63-63L342-792l618 618-56 56ZM537-440H120v-80h317l100 80ZM280-120v-240h80v63l-80-80v257h-80Zm463-563L597-829l56-56 227 227-56 56-81-81Zm-216 63L243-904l56-56 314 314-86 86Z"/></svg>',
     search: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="currentColor"><path d="M784-120 532-372q-30 24-69 38t-83 14q-109 0-184.5-75.5T120-580q0-109 75.5-184.5T380-840q109 0 184.5 75.5T640-580q0 44-14 83t-38 69l252 252-56 56ZM380-400q75 0 127.5-52.5T560-580q0-75-52.5-127.5T380-760q-75 0-127.5 52.5T200-580q0 75 52.5 127.5T380-400Z"/></svg>',
-    searchOff: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="currentColor"><path d="M784-120 532-372q-30 24-69 38t-83 14q-109 0-184.5-75.5T120-580q0-109 75.5-184.5T380-840q109 0 184.5 75.5T640-580q0 44-14 83t-38 69l252 252-56 56ZM380-400q75 0 127.5-52.5T560-580q0-75-52.5-127.5T380-760q-75 0-127.5 52.5T200-580q0 75 52.5 127.5T380-400ZM56 56 314-202q-10-18-18-37.5T282-280q-92-1-157-65.5T60-502q1-20 4.5-39.5T74-580l-18-18 56-56L792-74l-56 56L532-222l-68-68q23-28 39.5-60.5T520-420l-60-60q-13 14-27 26.5T402-430l-72-72q38-23 80.5-30.5T498-540l-80-80h-38q-109 0-184.5 75.5T120-580q0 109 75.5 184.5T380-320q17 0 32.5-1.5T444-326L384-386l-14 6q-16 6-32.5 9t-33.5 3q-59 0-100.5-41.5T162-510q0-17 3-33.5t9-32.5l-62-62q-15 28-23.5 58t-8.5 60q0 92 65.5 157T380-200q30 0 58-7t54-21l-58-58-378-378Z"/></svg>',
     up: '<svg xmlns="http://www.w3.org/2000/svg" height="18px" viewBox="0 0 24 24" width="18px" fill="currentColor"><path d="M0 0h24v24H0V0z" fill="none"/><path d="M4 12l1.41 1.41L11 7.83V20h2V7.83l5.58 5.59L20 12l-8-8-8 8z"/></svg>',
-    down: '<svg xmlns="http://www.w3.org/2000/svg" height="18px" viewBox="0 0 24 24" width="18px" fill="currentColor"><path d="M0 0h24v24H0V0z" fill="none"/><path d="M20 12l-1.41-1.41L13 16.17V4h-2v12.17l-5.58-5.59L4 12l8 8 8-8z"/></svg>',
+    down: '<svg xmlns="http://www.w3.org/2000/svg" height="18px" viewBox="0 0 24 24" width="18px" fill="currentColor"><path d="M20 12l-1.41-1.41L13 16.17V4h-2v12.17l-5.58-5.59L4 12l8 8 8-8z"/></svg>',
     edit: '<svg xmlns="http://www.w3.org/2000/svg" height="14px" viewBox="0 -960 960 960" width="14px" fill="currentColor"><path d="M200-200h57l391-391-57-57-391 391v57Zm-80 80v-170l528-527q12-11 26.5-17t30.5-6q16 0 31 6t26 17l55 56q12 11 17.5 26t5.5 30q0 16-5.5 30.5T817-647L290-120H120Zm640-584-56-56 56 56Zm-141 85-28-29 57 57-29-28Z"/></svg>',
     add: '<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="currentColor"><path d="M440-440H200v-80h240v-240h80v240h240v80H520v240h-80v-240Z"/></svg>',
     close: '<svg xmlns="http://www.w3.org/2000/svg" height="14px" viewBox="0 -960 960 960" width="14px" fill="currentColor"><path d="M280-120q-33 0-56.5-23.5T200-200v-520h-40v-80h200v-40h240v40h200v80h-40v520q0 33-23.5 56.5T680-120H280Zm400-600H280v520h400v-520ZM360-280h80v-360h-80v360Zm160 0h80v-360h-80v360ZM280-720v520-520Z"/></svg>',
@@ -71,14 +292,35 @@ const ICONS = {
     export: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="currentColor"><path d="M480-320 280-520l56-58 104 104v-326h80v326l104-104 56 58-200 200ZM240-160q-33 0-56.5-23.5T160-240v-120h80v120h480v-120h80v120q0 33-23.5 56.5T720-160H240Z"/></svg>',
     import: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="currentColor"><path d="M440-320v-326L336-542l-56-58 200-200 200 200-56 58-104-104v326h-80ZM240-160q-33 0-56.5-23.5T160-240v-120h80v120h480v-120h80v120q0 33-23.5 56.5T720-160H240Z"/></svg>',
     expandAll: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="currentColor"><path d="M480-120 300-300l58-58 122 122 122-122 58 58-180 180ZM358-598l-58-58 180-180 180 180-58 58-122-122-122 122Z"/></svg>',
-    collapseAll: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="currentColor"><path d="m356-160-56-56 180-180 180 180-56 56-124-124-124 124Zm124-404L300-744l56-56 124 124 124-124 56 56-180 180Z"/></svg>'
+    collapseAll: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="currentColor"><path d="m356-160-56-56 180-180 180 180-56 56-124-124-124 124Zm124-404L300-744l56-56 124 124 124-124 56 56-180 180Z"/></svg>',
+    refresh: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="currentColor"><path d="M480-160q-134 0-227-93t-93-227q0-134 93-227t227-93q69 0 132 28.5T720-690v-110h80v240H560v-80h135q-31-40-74.5-65T540-730q-100 0-170 70t-70 170q0 100 70 170t170 70q77 0 139-44t87-116h84q-28 106-114 173t-196 67Z"/></svg>',
+    focus: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="currentColor"><path d="M260-240q-25 0-42.5-17.5T200-300v-360q0-25 17.5-42.5T260-720h440q25 0 42.5 17.5T760-660v360q0 25-17.5 42.5T700-240H260Zm0-80h440v-360H260v360Zm220-40q42 0 71-29t29-71q0-42-29-71t-71-29q-42 0-71 29t-29 71q0 42 29 71t71 29ZM400-80q-33 0-56.5-23.5T320-160h320v-80h80v80q0 33-23.5 56.5T640-80H400ZM120-400v-80h80v80H120Zm0-160v-80h80v80H120Zm0 320v-80h80v80H120Z"/></svg>',
+    check: '<svg xmlns="http://www.w3.org/2000/svg" height="12px" viewBox="0 -960 960 960" width="12px" fill="white"><path d="M382-240 154-468l57-57 171 171 367-367 57 57-424 424Z"/></svg>',
+    sort: '<svg xmlns="http://www.w3.org/2000/svg" height="14px" viewBox="0 0 24 24" width="14px" fill="currentColor"><path d="M3 18h6v-2H3v2zM3 6v2h18V6H3zm0 7h12v-2H3v2z"/></svg>',
+    trash: '<svg xmlns="http://www.w3.org/2000/svg" height="14px" viewBox="0 -960 960 960" width="14px" fill="currentColor"><path d="M280-120q-33 0-56.5-23.5T200-200v-520h-40v-80h200v-40h240v40h200v80h-40v520q0 33-23.5 56.5T680-120H280Zm400-600H280v520h400v-520ZM360-280h80v-360h-80v360Zm160 0h80v-360h-80v360ZM280-720v520-520Z"/></svg>',
+    smallUp: '<svg xmlns="http://www.w3.org/2000/svg" height="18px" viewBox="0 0 24 24" width="18px" fill="currentColor"><path d="M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6z"/></svg>',
+    smallDown: '<svg xmlns="http://www.w3.org/2000/svg" height="18px" viewBox="0 0 24 24" width="18px" fill="currentColor"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg>',
+    flag: '<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="currentColor"><path d="M200-120v-680h360l16 80h224v400H520l-16-80H280v280h-80Zm300-440Zm86 160h134v-240H510l-16-80H280v240h290l16 80Z"/></svg>',
+    calendar: '<svg xmlns="http://www.w3.org/2000/svg" height="14px" viewBox="0 -960 960 960" width="14px" fill="currentColor"><path d="M200-80q-33 0-56.5-23.5T120-160v-560q0-33 23.5-56.5T200-800h40v-80h80v80h320v-80h80v80h40q33 0 56.5 23.5T840-720v560q0 33-23.5 56.5T760-80H200Zm0-80h560v-400H200v400Zm0-480h560v-80H200v80Zm0 0v-80 80Z"/></svg>',
+    chevron: '<svg xmlns="http://www.w3.org/2000/svg" height="18px" viewBox="0 0 24 24" width="18px" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>',
+    warning: '<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="currentColor"><path d="m40-120 440-760 440 760H40Zm138-80h604L480-720 178-200Zm302-40q17 0 28.5-11.5T520-280q0-17-11.5-28.5T480-320q-17 0-28.5 11.5T440-280q0 17 11.5 28.5T480-240Zm-40-120h80v-200h-80v200Zm40-100Z"/></svg>',
+    
+    // NEW ICONS FOR V17.3
+    selectAll: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="currentColor"><path d="M260-160q-42 0-71-29t-29-71v-440q0-42 29-71t71-29h440q42 0 71 29t29 71v440q0 42-29 71t-71 29H260Zm0-80h440v-440H260v440Zm178-106 208-208-56-57-152 152-82-82-56 57 138 138ZM260-700v440-440Z"/></svg>',
+    checkOn: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="#1a73e8"><path d="M382-240 154-468l57-57 171 171 367-367 57 57-424 424Z"/></svg>',
+    checkOff: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="#5f6368"><path d="M200-120q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h560q33 0 56.5 23.5T840-760v560q0 33-23.5 56.5T760-120H200Zm0-80h560v-560H200v560Z"/></svg>',
+    checkIndet: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="#5f6368"><path d="M200-120q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h560q33 0 56.5 23.5T840-760v560q0 33-23.5 56.5T760-120H200Zm0-80h560v-560H200v560Zm120-240v-80h320v80H320Z"/></svg>'
 };
 
 // --- NOTEBOOK ID EXTRACTION ---
 function getNotebookId() {
-    // URL format: https://notebooklm.google.com/notebook/NOTEBOOK_ID
-    const match = window.location.pathname.match(/\/notebook\/([^\/\?]+)/);
-    return match ? match[1] : null;
+    try {
+        const match = window.location.pathname.match(/\/notebook\/([^\/\?]+)/);
+        return match ? match[1] : null;
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Failed to get notebook ID:', e.message);
+        return null;
+    }
 }
 
 function getStorageKey(base) {
@@ -87,138 +329,716 @@ function getStorageKey(base) {
     return `${base}_${notebookId}`;
 }
 
-// --- INIT SEQUENCE ---
-function init() {
-    currentNotebookId = getNotebookId();
-    
-    if (!currentNotebookId) {
-        console.log("[NotebookLM Tree] Not in a notebook, waiting...");
-        // Check periodically for notebook navigation
-        startUrlWatcher();
-        return;
+// --- CLEANUP FUNCTION ---
+function cleanup() {
+    try {
+        if (mainObserver) {
+            mainObserver.disconnect();
+            mainObserver = null;
+            console.debug('[NotebookLM Tree] Observer disconnected');
+        }
+        if (healthCheckInterval) {
+            clearInterval(healthCheckInterval);
+            healthCheckInterval = null;
+        }
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Cleanup error:', e.message);
     }
-    
-    const stateKey = getStorageKey('notebookTreeState');
-    const indexKey = getStorageKey('notebookSearchIndex');
-    
-    console.log(`[NotebookLM Tree] Loading data for notebook: ${currentNotebookId}`);
-    
-    chrome.storage.local.get([stateKey, indexKey], (result) => {
-        if (result[stateKey] && result[stateKey].source) {
-            appState = result[stateKey];
-            if (!appState.settings) appState.settings = { showGenerators: true, showResearch: true };
-            if (!appState.source.pinned) appState.source.pinned = [];
-            if (!appState.studio.pinned) appState.studio.pinned = [];
-        } else {
-            // Fresh state for this notebook
-            appState = JSON.parse(JSON.stringify(DEFAULT_STATE));
+}
+
+// --- SELECTOR HEALTH MONITORING ---
+function checkSelectorHealth() {
+    try {
+        const health = {};
+        const criticalSelectors = ['sourceRow', 'studioRow', 'sourceTitle', 'studioTitle'];
+        
+        for (const key of criticalSelectors) {
+            const selector = activeSelectors[key];
+            const found = safeQuery(document, selector);
+            health[key] = !!found;
         }
         
-        if (result[indexKey]) {
-            searchIndex = result[indexKey];
-            console.log(`[NotebookLM Tree] Loaded index with ${Object.keys(searchIndex).length} entries.`);
-        } else {
-            searchIndex = {};
+        const failures = Object.entries(health).filter(([_, v]) => !v);
+        const failureCount = failures.length;
+        
+        // Only log/warn if status changed
+        const statusKey = JSON.stringify(health);
+        if (statusKey !== lastHealthStatus) {
+            lastHealthStatus = statusKey;
+            
+            if (failureCount >= SELECTOR_FAILURE_THRESHOLD) {
+                console.warn('[NotebookLM Tree] Multiple selectors failing:', failures.map(f => f[0]).join(', '));
+            } else if (failureCount > 0) {
+                console.debug('[NotebookLM Tree] Some selectors not finding elements:', failures.map(f => f[0]).join(', '));
+            }
         }
+        
+        return health;
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Health check error:', e.message);
+        return {};
+    }
+}
 
-        if (REMOTE_CONFIG_URL) {
+// --- VERSION CHECK ---
+function checkVersionSync() {
+    try {
+        const version = getExtensionVersion();
+        console.debug('[NotebookLM Tree] Running version:', version);
+    } catch (e) {
+        // Not critical, ignore
+    }
+}
+
+// --- INIT SEQUENCE ---
+function init() {
+    try {
+        cleanup();
+        checkVersionSync();
+        
+        currentNotebookId = getNotebookId();
+        if (!currentNotebookId) {
+            startUrlWatcher();
+            return;
+        }
+        
+        const stateKey = getStorageKey('notebookTreeState');
+        const indexKey = getStorageKey('notebookSearchIndex');
+        
+        // V17.5: Local-only storage with migration from sync
+        // First check if there's legacy data in sync storage to migrate
+        chrome.storage.sync.get([stateKey], (syncResult) => {
+            const hasSyncData = !chrome.runtime.lastError && syncResult[stateKey] && syncResult[stateKey].source;
+            
+            chrome.storage.local.get([stateKey, indexKey], (localResult) => {
+                // Migration: If sync has data but local doesn't, migrate it
+                if (hasSyncData && (!localResult[stateKey] || !localResult[stateKey].source)) {
+                    console.debug('[NotebookLM Tree] Migrating data from sync to local storage');
+                    appState = syncResult[stateKey];
+                    // Clear sync storage after migration
+                    chrome.storage.sync.remove(stateKey, () => {
+                        if (!chrome.runtime.lastError) {
+                            console.debug('[NotebookLM Tree] Sync data cleared after migration');
+                        }
+                    });
+                } else if (localResult[stateKey] && localResult[stateKey].source) {
+                    // Use local data (primary path)
+                    appState = localResult[stateKey];
+                    // Clean up any orphaned sync data
+                    if (hasSyncData) {
+                        chrome.storage.sync.remove(stateKey);
+                    }
+                } else {
+                    // Fresh install - start with defaults
+                    appState = JSON.parse(JSON.stringify(DEFAULT_STATE));
+                }
+                
+                // Ensure all required properties exist
+                if (!appState.settings) appState.settings = { showGenerators: true, showResearch: true, focusMode: false, tasksOpen: true, completedOpen: false };
+                if (!appState.source) appState.source = { folders: {}, mappings: {}, pinned: [], tasks: [] };
+                if (!appState.studio) appState.studio = { folders: {}, mappings: {}, pinned: [] };
+                if (!appState.source.pinned) appState.source.pinned = [];
+                if (!appState.studio.pinned) appState.studio.pinned = [];
+                if (!appState.source.tasks) appState.source.tasks = [];
+
+                // Load search index (always local)
+                if (localResult[indexKey]) {
+                    searchIndex = localResult[indexKey];
+                } else {
+                    searchIndex = {};
+                }
+                
+                // Save migrated/initialized state to local
+                chrome.storage.local.set({ [stateKey]: appState });
+
+                fetchRemoteConfigWithCache().then(() => {
+                    startApp();
+                }).catch(() => {
+                    startApp();
+                });
+            });
+        });
+        startUrlWatcher();
+    } catch (e) {
+        console.error('[NotebookLM Tree] Init failed:', e);
+        startApp();
+    }
+}
+
+// --- REMOTE CONFIG WITH CACHING ---
+async function fetchRemoteConfigWithCache() {
+    const CACHE_KEY = 'remoteConfigCache';
+    try {
+        const cached = await new Promise(resolve => {
+            chrome.storage.local.get([CACHE_KEY], result => resolve(result[CACHE_KEY]));
+        });
+        
+        if (cached && cached.data && (Date.now() - cached.timestamp < CONFIG_CACHE_TTL_MS)) {
+            activeSelectors = { ...DEFAULT_SELECTORS, ...cached.data };
+            console.debug('[NotebookLM Tree] Using cached config');
+            return;
+        }
+        
+        if (!REMOTE_CONFIG_URL) return;
+        
+        const response = await new Promise((resolve, reject) => {
             chrome.runtime.sendMessage(
                 { action: "fetchConfig", url: REMOTE_CONFIG_URL },
-                (response) => {
-                    if (response && response.success && response.data) {
-                        activeSelectors = { ...DEFAULT_SELECTORS, ...response.data };
-                        console.log("NotebookLM Tree: Updated selectors from remote config.");
-                    } else {
-                        console.log("NotebookLM Tree: Using default selectors.");
-                    }
-                    startApp(); 
+                (r) => {
+                    if (chrome.runtime.lastError) reject(chrome.runtime.lastError);
+                    else if (r && r.success && r.data) resolve(r.data);
+                    else reject(new Error(r?.error || 'Unknown error'));
                 }
             );
-        } else {
-            startApp();
-        }
-    });
-    
-    // Watch for URL changes (user navigates to different notebook)
-    startUrlWatcher();
+        });
+        
+        activeSelectors = { ...DEFAULT_SELECTORS, ...response };
+        chrome.storage.local.set({ [CACHE_KEY]: { data: response, timestamp: Date.now() } });
+        console.debug('[NotebookLM Tree] Remote config loaded and cached');
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Config fetch failed, using defaults:', e.message);
+    }
 }
 
 function startUrlWatcher() {
-    if (urlCheckInterval) return; // Already watching
-    
+    if (urlCheckInterval) return;
     urlCheckInterval = setInterval(() => {
-        const newNotebookId = getNotebookId();
-        
-        if (newNotebookId && newNotebookId !== currentNotebookId) {
-            console.log(`[NotebookLM Tree] Notebook changed: ${currentNotebookId} -> ${newNotebookId}`);
-            
-            // Clean up existing UI
-            const existingSource = document.getElementById('plugin-source-root');
-            const existingStudio = document.getElementById('plugin-studio-root');
-            if (existingSource) existingSource.remove();
-            if (existingStudio) existingStudio.remove();
-            
-            // Remove injection markers
-            document.querySelectorAll('.plugin-ui-injected').forEach(el => {
-                el.classList.remove('plugin-ui-injected');
-            });
-            
-            // Reset state and reinitialize
-            currentNotebookId = newNotebookId;
-            appState = JSON.parse(JSON.stringify(DEFAULT_STATE));
-            searchIndex = {};
-            
-            // Reload data for new notebook
-            const stateKey = getStorageKey('notebookTreeState');
-            const indexKey = getStorageKey('notebookSearchIndex');
-            
-            chrome.storage.local.get([stateKey, indexKey], (result) => {
-                if (result[stateKey] && result[stateKey].source) {
-                    appState = result[stateKey];
-                    if (!appState.settings) appState.settings = { showGenerators: true, showResearch: true };
-                    if (!appState.source.pinned) appState.source.pinned = [];
-                    if (!appState.studio.pinned) appState.studio.pinned = [];
-                }
-                
-                if (result[indexKey]) {
-                    searchIndex = result[indexKey];
-                }
-                
-                // Re-run organizer for new notebook
-                setTimeout(runOrganizer, 500);
-            });
-        } else if (newNotebookId && !currentNotebookId) {
-            // User just navigated into a notebook
-            currentNotebookId = newNotebookId;
-            init();
+        try {
+            const newNotebookId = getNotebookId();
+            if (newNotebookId && newNotebookId !== currentNotebookId) {
+                cleanup();
+                location.reload();
+            } else if (newNotebookId && !currentNotebookId) {
+                currentNotebookId = newNotebookId;
+                init();
+            }
+        } catch (e) {
+            console.debug('[NotebookLM Tree] URL watcher error:', e.message);
         }
-    }, 1000);
+    }, URL_CHECK_INTERVAL_MS);
 }
 
 function startApp() {
-    startObserver();
-    setTimeout(runOrganizer, 500);
+    try {
+        startObserver();
+        setTimeout(safeRunOrganizer, INIT_DELAY_MS);
+        healthCheckInterval = setInterval(checkSelectorHealth, HEALTH_CHECK_INTERVAL_MS);
+        document.addEventListener('click', (e) => {
+            try {
+                const toggleBtn = e.target.closest('.toggle-studio-panel-button');
+                if (toggleBtn && appState.settings.focusMode) {
+                    appState.settings.focusMode = false;
+                    saveState();
+                    applyFocusMode();
+                }
+            } catch (err) { }
+        });
+    } catch (e) {
+        console.error('[NotebookLM Tree] startApp failed:', e);
+    }
 }
 
 function saveState() {
-    const stateKey = getStorageKey('notebookTreeState');
-    if (!stateKey) return;
-    
-    chrome.storage.local.set({ [stateKey]: appState });
+    try {
+        const stateKey = getStorageKey('notebookTreeState');
+        if (!stateKey) return;
+        
+        // V17.5: Local-only storage (no sync limits to worry about)
+        chrome.storage.local.set({ [stateKey]: appState }, () => {
+            if (chrome.runtime.lastError) {
+                console.error('[NotebookLM Tree] Save failed:', chrome.runtime.lastError.message);
+            }
+        });
+    } catch (e) {
+        console.error('[NotebookLM Tree] Save state failed:', e);
+    }
 }
 
-// --- HELPER: KEY NORMALIZER ---
+
+// --- [NEW] SOURCE TOGGLE FUNCTIONS ---
+
+/**
+ * Robustly toggles the global "Select all sources" checkbox.
+ */
+function toggleAllSources() {
+    try {
+        // 1. Target the specific "Select all" input defined by NotebookLM
+        const selectAllInput = document.querySelector('input[aria-label="Select all sources"]');
+        
+        if (selectAllInput) {
+            // Click the native master toggle
+            selectAllInput.click();
+            showToast("Toggled all sources");
+        } else {
+            // Fallback: If master toggle isn't found, try to toggle visible rows manually
+            const sourceRowSelector = Array.isArray(activeSelectors.sourceRow) ? activeSelectors.sourceRow.join(',') : activeSelectors.sourceRow;
+            const inputs = document.querySelectorAll(`${sourceRowSelector} mat-checkbox input`);
+            if (inputs.length === 0) return showToast("No sources found");
+            
+            // Heuristic: If ANY are unchecked, check all. Else uncheck all.
+            const anyUnchecked = Array.from(inputs).some(i => !i.checked && i.getAttribute('aria-checked') !== 'true');
+            let count = 0;
+            inputs.forEach(input => {
+                const isChecked = input.checked || input.getAttribute('aria-checked') === 'true';
+                if (anyUnchecked !== isChecked) {
+                    input.click();
+                    count++;
+                }
+            });
+            showToast(anyUnchecked ? "Selected all visible" : "Deselected all visible");
+        }
+    } catch (e) {
+        console.error('[NotebookLM Tree] Toggle global error:', e);
+    }
+}
+
+/**
+ * Toggles all items contained within a specific folder.
+ */
+function toggleFolderItems(folderId, context) {
+    try {
+        const folderContent = document.getElementById(`folder-content-${folderId}`);
+        if (!folderContent) return;
+
+        // 1. Identify all proxies in this folder
+        const proxies = folderContent.querySelectorAll('.plugin-proxy-item');
+        if (proxies.length === 0) return;
+
+        // 2. Find their native checkboxes
+        const targets = [];
+        proxies.forEach(p => {
+            const title = p.dataset.ref;
+            // Find native row
+            const sourceSelector = Array.isArray(activeSelectors.sourceRow) ? activeSelectors.sourceRow : [activeSelectors.sourceRow];
+            const nativeRows = safeQueryAll(document, sourceSelector);
+            
+            for (const row of nativeRows) {
+                 const titleEl = safeQuery(row, activeSelectors.sourceTitle);
+                 if (titleEl && safeGetText(titleEl) === title) {
+                     const box = row.querySelector('mat-checkbox input');
+                     if (box) targets.push(box);
+                     break;
+                 }
+            }
+        });
+
+        // 3. Determine target state (If any unchecked -> Check All)
+        const anyUnchecked = targets.some(t => !t.checked && t.getAttribute('aria-checked') !== 'true');
+
+        // 4. Execute
+        targets.forEach(t => {
+            const isChecked = t.checked || t.getAttribute('aria-checked') === 'true';
+            if (isChecked !== anyUnchecked) t.click();
+        });
+
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Toggle folder error:', e);
+    }
+}
+
+// --- STANDARD FUNCTIONS (Task, Indexing, etc) ---
+
+function toggleFocusMode() {
+    appState.settings.focusMode = !appState.settings.focusMode;
+    saveState();
+    applyFocusMode();
+}
+
+function applyFocusMode() {
+    try {
+        const isFocus = appState.settings.focusMode;
+        const btn = document.querySelector('.plugin-btn.toggle-focus');
+        if (isFocus) {
+            document.body.classList.add('plugin-focus-mode');
+            if (btn) { btn.classList.remove('toggle-off'); btn.title = "Exit Zen Mode"; }
+        } else {
+            document.body.classList.remove('plugin-focus-mode');
+            if (btn) { btn.classList.add('toggle-off'); btn.title = "Enter Zen Mode"; }
+            const panels = document.querySelectorAll('.studio-panel, .chat-panel, .source-panel, section');
+            panels.forEach(p => {
+                if (p && (p.style.width || p.style.flex || p.style.inlineSize)) {
+                    p.style.width = '';
+                    p.style.flex = '';
+                    p.style.minWidth = '';
+                    p.style.maxWidth = '';
+                    p.style.inlineSize = '';
+                }
+            });
+        }
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Apply focus mode error:', e.message);
+    }
+}
+
+function renderTasks() {
+    try {
+        const mount = document.getElementById('plugin-task-list-mount');
+        const headerCount = document.getElementById('plugin-task-count');
+        if (!mount) return;
+        mount.innerHTML = '';
+        const tasks = appState.source.tasks || [];
+        if (appState.settings.completedOpen === undefined) appState.settings.completedOpen = false;
+        const activeItems = [];
+        const doneItems = [];
+        tasks.forEach((task, index) => {
+            const item = { ...task, originalIndex: index };
+            if (task.done) doneItems.push(item); else activeItems.push(item);
+        });
+        if (headerCount) headerCount.innerText = activeItems.length > 0 ? `(${activeItems.length})` : '';
+
+        if (tasks.length === 0) {
+            mount.innerHTML = '<div style="padding:12px; font-style:italic; color:var(--plugin-text-secondary); font-size:12px; text-align:center;">No tasks...</div>';
+            return;
+        }
+        activeItems.forEach(item => mount.appendChild(createTaskElement(item, item.originalIndex, tasks, false)));
+        if (doneItems.length > 0) {
+            const completedGroup = document.createElement('div');
+            completedGroup.className = 'plugin-completed-group';
+            const isOpen = appState.settings.completedOpen;
+            const arrowClass = isOpen ? 'arrow open' : 'arrow';
+            completedGroup.innerHTML = `
+                <div class="plugin-completed-header">
+                    <div style="display:flex; align-items:center; gap:4px;"><span class="${arrowClass}">${ICONS.chevron}</span> Completed (${doneItems.length})</div>
+                    <div class="plugin-header-btn clear-done-btn" title="Clear All Completed">${ICONS.trash}</div>
+                </div>
+                <div class="plugin-completed-body" style="display:${isOpen ? 'block' : 'none'}"></div>
+            `;
+            const header = completedGroup.querySelector('.plugin-completed-header');
+            if (header) {
+                header.onclick = (e) => {
+                    if (e.target.closest('.clear-done-btn')) return;
+                    appState.settings.completedOpen = !appState.settings.completedOpen;
+                    saveState();
+                    renderTasks();
+                };
+            }
+            const clearBtn = completedGroup.querySelector('.clear-done-btn');
+            if (clearBtn) {
+                clearBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    showConfirmModal(`Remove ${doneItems.length} completed tasks?`, () => {
+                        appState.source.tasks = appState.source.tasks.filter(t => !t.done);
+                        saveState();
+                        renderTasks();
+                    });
+                };
+            }
+            const body = completedGroup.querySelector('.plugin-completed-body');
+            if (body) {
+                doneItems.forEach(item => body.appendChild(createTaskElement(item, item.originalIndex, tasks, true)));
+            }
+            mount.appendChild(completedGroup);
+        }
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Render tasks error:', e.message);
+    }
+}
+
+function createTaskElement(task, realIndex, allTasks, isCompletedSection) {
+    const div = document.createElement('div');
+    div.className = `plugin-task-item ${task.done ? 'done' : ''} task-prio-${task.prio || 0}`;
+    let dateHtml = '';
+    if (task.date) {
+        const isPast = new Date(task.date) < new Date().setHours(0, 0, 0, 0);
+        const colorStyle = isPast && !task.done ? 'color:#d93025;' : '';
+        dateHtml = `<div class="plugin-task-date" style="${colorStyle}">${ICONS.calendar} ${task.date}</div>`;
+    }
+    const moveActions = isCompletedSection ? '' : `
+        <div class="plugin-task-btn up" title="Move Up">${ICONS.smallUp}</div>
+        <div class="plugin-task-btn down" title="Move Down">${ICONS.smallDown}</div>
+    `;
+    div.innerHTML = `
+        <div class="plugin-task-check">${task.done ? ICONS.check : ''}</div>
+        <div class="plugin-task-content">
+            <div class="plugin-task-text" title="${task.text}">${task.text}</div>
+            ${dateHtml}
+        </div>
+        <div class="plugin-task-actions">
+            <div class="plugin-task-btn prio" title="Priority (Red/Yel/Blu)">${ICONS.flag}</div>
+            <div class="plugin-task-btn edit" title="Edit">${ICONS.edit}</div>
+            ${moveActions}
+            <div class="plugin-task-btn del" title="Delete">${ICONS.close}</div>
+        </div>
+    `;
+    
+    const checkEl = div.querySelector('.plugin-task-check');
+    if (checkEl) {
+        checkEl.onclick = (e) => {
+            e.stopPropagation();
+            allTasks[realIndex].done = !allTasks[realIndex].done;
+            saveState();
+            renderTasks();
+        };
+    }
+    
+    const prioBtn = div.querySelector('.plugin-task-btn.prio');
+    if (prioBtn) {
+        prioBtn.onclick = (e) => {
+            e.stopPropagation();
+            allTasks[realIndex].prio = ((allTasks[realIndex].prio || 0) + 1) % 4;
+            saveState();
+            renderTasks();
+        };
+    }
+    
+    const editBtn = div.querySelector('.plugin-task-btn.edit');
+    if (editBtn) {
+        editBtn.onclick = (e) => {
+            e.stopPropagation();
+            const newText = prompt("Edit Task:", task.text);
+            if (newText !== null) {
+                allTasks[realIndex].text = newText;
+                const newDate = prompt("Set Due Date (YYYY-MM-DD) or leave empty:", task.date || "");
+                if (newDate !== null) allTasks[realIndex].date = newDate;
+                saveState();
+                renderTasks();
+            }
+        };
+    }
+    
+    const delBtn = div.querySelector('.plugin-task-btn.del');
+    if (delBtn) {
+        delBtn.onclick = (e) => {
+            e.stopPropagation();
+            showConfirmModal("Delete task?", () => {
+                allTasks.splice(realIndex, 1);
+                saveState();
+                renderTasks();
+            });
+        };
+    }
+    
+    if (!isCompletedSection) {
+        const upBtn = div.querySelector('.plugin-task-btn.up');
+        if (upBtn) {
+            upBtn.onclick = (e) => {
+                e.stopPropagation();
+                if (realIndex > 0) {
+                    [allTasks[realIndex], allTasks[realIndex - 1]] = [allTasks[realIndex - 1], allTasks[realIndex]];
+                    saveState();
+                    renderTasks();
+                }
+            };
+        }
+        const downBtn = div.querySelector('.plugin-task-btn.down');
+        if (downBtn) {
+            downBtn.onclick = (e) => {
+                e.stopPropagation();
+                if (realIndex < allTasks.length - 1) {
+                    [allTasks[realIndex], allTasks[realIndex + 1]] = [allTasks[realIndex + 1], allTasks[realIndex]];
+                    saveState();
+                    renderTasks();
+                }
+            };
+        }
+    }
+    return div;
+}
+
+function addTask(taskObj) {
+    if (!appState.source.tasks) appState.source.tasks = [];
+    if (typeof taskObj === 'string') {
+        appState.source.tasks.push({ text: taskObj, done: false, prio: 0, date: "" });
+    } else {
+        appState.source.tasks.push(taskObj);
+    }
+    saveState();
+    renderTasks();
+}
+
 function normalizeKey(str) {
     if (!str) return "";
     return str.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
-// --- EXPAND/COLLAPSE ALL FOLDERS ---
+function getSimilarity(s1, s2) {
+    if (!s1 || !s2) return 0;
+    let longer = s1;
+    let shorter = s2;
+    if (s1.length < s2.length) { longer = s2; shorter = s1; }
+    let longerLength = longer.length;
+    if (longerLength === 0) return 1.0;
+    return (longerLength - editDistance(longer, shorter)) / longerLength;
+}
+
+function editDistance(s1, s2) {
+    s1 = (s1 || '').toLowerCase();
+    s2 = (s2 || '').toLowerCase();
+    let costs = new Array();
+    for (let i = 0; i <= s1.length; i++) {
+        let lastValue = i;
+        for (let j = 0; j <= s2.length; j++) {
+            if (i == 0) costs[j] = j;
+            else {
+                if (j > 0) {
+                    let newValue = costs[j - 1];
+                    if (s1.charAt(i - 1) != s2.charAt(j - 1)) newValue = Math.min(Math.min(newValue, lastValue), costs[j]) + 1;
+                    costs[j - 1] = lastValue;
+                    lastValue = newValue;
+                }
+            }
+        }
+        if (i > 0) costs[s2.length] = lastValue;
+    }
+    return costs[s2.length];
+}
+
+function saveToIndex(title, content) {
+    try {
+        if (!title || !content || content.length < 5) return;
+        const indexKey = getStorageKey('notebookSearchIndex');
+        if (!indexKey) return;
+        const key = normalizeKey(title);
+        let safeContent = content.length > MAX_INDEX_CONTENT_LENGTH ? content.substring(0, MAX_INDEX_CONTENT_LENGTH) : content;
+        safeContent = safeContent.toLowerCase();
+        if (typeof LZString !== 'undefined') {
+            safeContent = LZString.compressToUTF16(safeContent);
+        }
+        if (searchIndex[key] === safeContent) {
+            // Update access time even if content unchanged
+            searchIndexAccessTimes[key] = Date.now();
+            return;
+        }
+        
+        // Check size and evict if necessary
+        const newEntrySize = new Blob([safeContent]).size;
+        let currentSize = Object.values(searchIndex).reduce((acc, val) => acc + new Blob([val]).size, 0);
+        
+        // Evict least recently used entries until we have room
+        while (currentSize + newEntrySize > MAX_INDEX_SIZE_BYTES && Object.keys(searchIndex).length > 0) {
+            const lruKey = Object.keys(searchIndexAccessTimes).sort((a, b) => 
+                (searchIndexAccessTimes[a] || 0) - (searchIndexAccessTimes[b] || 0)
+            )[0];
+            
+            if (lruKey && searchIndex[lruKey]) {
+                currentSize -= new Blob([searchIndex[lruKey]]).size;
+                delete searchIndex[lruKey];
+                delete searchIndexAccessTimes[lruKey];
+                console.debug('[NotebookLM Tree] Evicted LRU index entry:', lruKey);
+            } else {
+                break; // Safety: avoid infinite loop
+            }
+        }
+        
+        searchIndex[key] = safeContent;
+        searchIndexAccessTimes[key] = Date.now();
+        chrome.storage.local.set({ [indexKey]: searchIndex });
+        updateSearchStats('studio');
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Save to index error:', e.message);
+    }
+}
+
+function decompressContent(compressedContent, key) {
+    if (!compressedContent) return "";
+    // Update access time for LRU tracking
+    if (key) searchIndexAccessTimes[key] = Date.now();
+    if (typeof LZString === 'undefined') return compressedContent;
+    try {
+        const decompressed = LZString.decompressFromUTF16(compressedContent);
+        return decompressed || compressedContent;
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Decompression error:', e.message);
+        return compressedContent;
+    }
+}
+
+function filterProxies(context, query) {
+    try {
+        const term = (query || '').toLowerCase().trim();
+        const container = document.getElementById(`plugin-${context}-root`);
+        if (!container) return;
+        const getFolderNode = (id) => container.querySelector(`#node-${id}`);
+        if (!term) {
+            container.querySelectorAll('.plugin-proxy-item').forEach(el => {
+                el.style.display = 'flex';
+                el.style.opacity = '1';
+                el.removeAttribute('data-match-type');
+            });
+            container.querySelectorAll('.plugin-tree-node').forEach(el => el.style.display = 'block');
+            Object.values(appState[context].folders).forEach(f => {
+                const node = getFolderNode(f.id);
+                if (node) {
+                    if (f.isOpen) node.classList.add('open');
+                    else node.classList.remove('open');
+                }
+            });
+            return;
+        }
+        container.querySelectorAll('.plugin-proxy-item').forEach(el => el.style.display = 'none');
+        container.querySelectorAll('.plugin-tree-node').forEach(el => el.style.display = 'none');
+        const proxies = container.querySelectorAll('.plugin-proxy-item');
+        const terms = term.split(' ').filter(t => t);
+        proxies.forEach(proxy => {
+            const visibleText = proxy.dataset.searchTerm || proxy.innerText.toLowerCase();
+            const titleRaw = proxy.dataset.ref || "";
+            const titleKey = normalizeKey(titleRaw);
+            let deepContent = decompressContent(searchIndex[titleKey] || "", titleKey);
+            const isExactMatch = terms.every(t => (visibleText.includes(t) || deepContent.includes(t)));
+            const isFuzzyMatch = !isExactMatch && terms.every(t => getSimilarity(visibleText, t) > FUZZY_MATCH_THRESHOLD);
+            if (isExactMatch || isFuzzyMatch) {
+                proxy.style.display = 'flex';
+                if (isFuzzyMatch) {
+                    proxy.setAttribute('data-match-type', 'fuzzy');
+                } else {
+                    proxy.setAttribute('data-match-type', 'exact');
+                    proxy.style.opacity = '1';
+                }
+                let parent = proxy.parentElement;
+                while (parent && parent !== container) {
+                    if (parent.classList.contains('plugin-node-children')) {
+                        const folderNode = parent.parentElement;
+                        if (folderNode) {
+                            folderNode.style.display = 'block';
+                            folderNode.classList.add('open');
+                        }
+                    }
+                    parent = parent.parentElement;
+                }
+            }
+        });
+        const folderNodes = container.querySelectorAll('.plugin-tree-node');
+        folderNodes.forEach(node => {
+            const header = node.querySelector('.plugin-folder-header .folder-name');
+            if (!header) return;
+            const folderName = (header.innerText || '').toLowerCase();
+            const isFolderMatch = folderName.includes(term) || getSimilarity(folderName, term) > FOLDER_NAME_MATCH_THRESHOLD;
+            if (isFolderMatch) {
+                node.style.display = 'block';
+                let parent = node.parentElement;
+                while (parent && parent !== container) {
+                    if (parent.classList.contains('plugin-node-children')) {
+                        const grandParent = parent.parentElement;
+                        if (grandParent) {
+                            grandParent.style.display = 'block';
+                            grandParent.classList.add('open');
+                        }
+                    }
+                    parent = parent.parentElement;
+                }
+            }
+        });
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Filter proxies error:', e.message);
+    }
+}
+
+function rebuildSearchIndex() {
+    showConfirmModal("Rebuild Search Index?<br><br>This will clear your local search cache.", () => {
+        searchIndex = {};
+        searchIndexAccessTimes = {};
+        const indexKey = getStorageKey('notebookSearchIndex');
+        if (indexKey) chrome.storage.local.remove(indexKey);
+        updateSearchStats('studio');
+        showToast("Index cleared. Please click your notes to re-index them.");
+    });
+}
+
 function expandAllFolders(context) {
     Object.values(appState[context].folders).forEach(f => f.isOpen = true);
     saveState();
     renderTree(context);
-    setTimeout(() => processItems(context), 50);
+    setTimeout(() => safeProcessItems(context), DOM_SETTLE_DELAY_MS);
 }
 
 function collapseAllFolders(context) {
@@ -227,498 +1047,487 @@ function collapseAllFolders(context) {
     renderTree(context);
 }
 
-// --- EXPORT/IMPORT FUNCTIONS ---
 function exportFolders() {
-    const notebookId = getNotebookId();
-    const data = {
-        version: "14.2",
-        exportedAt: new Date().toISOString(),
-        description: "NotebookLM Pro Tree folder backup",
-        notebookId: notebookId,
-        source: appState.source,
-        studio: appState.studio,
-        settings: appState.settings
-    };
-    
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `notebooklm-folders-${notebookId ? notebookId.substring(0, 8) : 'backup'}-${new Date().toISOString().split('T')[0]}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    
-    URL.revokeObjectURL(url);
-    showToast("✓ Folders exported");
+    try {
+        const notebookId = getNotebookId();
+        const data = {
+            version: getExtensionVersion(),
+            exportedAt: new Date().toISOString(),
+            description: "NotebookLM Pro Tree backup",
+            notebookId: notebookId,
+            source: appState.source,
+            studio: appState.studio,
+            settings: appState.settings
+        };
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `notebooklm-pro-${notebookId ? notebookId.substring(0, 8) : 'backup'}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        showToast("âœ“ Config exported");
+    } catch (e) {
+        console.error('[NotebookLM Tree] Export failed:', e);
+        showToast("âš ï¸ Export failed");
+    }
 }
 
 function importFolders() {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.json';
-    
-    input.onchange = (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-        
-        const reader = new FileReader();
-        reader.onload = (event) => {
-            try {
-                const data = JSON.parse(event.target.result);
-                
-                // Basic validation
-                if (!data.source || !data.studio) {
-                    throw new Error("Invalid backup file - missing source or studio data");
-                }
-                
-                // Validate folder structure
-                if (typeof data.source.folders !== 'object' || typeof data.studio.folders !== 'object') {
-                    throw new Error("Invalid backup file - malformed folder structure");
-                }
-                
-                // Warn if importing from different notebook
-                const currentId = getNotebookId();
-                if (data.notebookId && data.notebookId !== currentId) {
-                    const proceed = confirm(
-                        "This backup is from a different notebook.\n\n" +
-                        "The folder structure will be imported, but item mappings may not work " +
-                        "(since source/note names are likely different).\n\n" +
-                        "Continue anyway?"
-                    );
-                    if (!proceed) return;
-                }
-                
-                // Ask user: Replace or Merge?
-                const choice = confirm(
-                    "Replace all existing folders?\n\n" +
-                    "OK = Yes, replace everything\n" +
-                    "Cancel = No, merge instead (keeps existing folders)"
-                );
-                
-                if (choice) {
-                    // Replace mode
-                    appState.source = data.source;
-                    appState.studio = data.studio;
-                    if (data.settings) appState.settings = { ...appState.settings, ...data.settings };
-                } else {
-                    // Merge mode - add new folders, keep existing
-                    Object.keys(data.source.folders).forEach(id => {
-                        if (!appState.source.folders[id]) {
-                            appState.source.folders[id] = data.source.folders[id];
-                        }
-                    });
-                    Object.keys(data.studio.folders).forEach(id => {
-                        if (!appState.studio.folders[id]) {
-                            appState.studio.folders[id] = data.studio.folders[id];
-                        }
-                    });
-                    
-                    Object.keys(data.source.mappings).forEach(key => {
-                        if (!appState.source.mappings[key]) {
-                            appState.source.mappings[key] = data.source.mappings[key];
-                        }
-                    });
-                    Object.keys(data.studio.mappings).forEach(key => {
-                        if (!appState.studio.mappings[key]) {
-                            appState.studio.mappings[key] = data.studio.mappings[key];
-                        }
-                    });
-                    
-                    if (data.source.pinned) {
-                        appState.source.pinned = [...new Set([...appState.source.pinned, ...data.source.pinned])];
-                    }
-                    if (data.studio.pinned) {
-                        appState.studio.pinned = [...new Set([...appState.studio.pinned, ...data.studio.pinned])];
-                    }
-                }
-                
-                if (!appState.source.pinned) appState.source.pinned = [];
-                if (!appState.studio.pinned) appState.studio.pinned = [];
-                
-                saveState();
-                showToast("✓ Folders imported - reloading...");
-                
-                setTimeout(() => {
-                    location.reload();
-                }, 1000);
-                
-            } catch (err) {
-                console.error("[NotebookLM Tree] Import error:", err);
-                alert("Import failed: " + err.message);
-            }
-        };
-        reader.readAsText(file);
-    };
-    
-    input.click();
-}
-
-// --- ROBUST INDEXER: SAVE CONTENT ---
-function saveToIndex(title, content) {
-    if (!title || !content || content.length < 5) return;
-    
-    const indexKey = getStorageKey('notebookSearchIndex');
-    if (!indexKey) return;
-    
-    const key = normalizeKey(title);
-    const safeContent = content.length > 20000 ? content.substring(0, 20000) : content;
-    const lowerContent = safeContent.toLowerCase();
-
-    if (searchIndex[key] === lowerContent) return;
-
-    searchIndex[key] = lowerContent;
-    
-    chrome.storage.local.set({ [indexKey]: searchIndex }, () => {
-        if (chrome.runtime.lastError) {
-            console.warn("[NotebookLM Tree] Storage error:", chrome.runtime.lastError);
-        }
-    });
-    console.log(`[NotebookLM Tree] Indexed: "${key}"`);
-    
-    updateSearchStats('studio');
-
-    const activeEl = document.activeElement;
-    const isTyping = activeEl && (
-        activeEl.classList.contains('ql-editor') || 
-        activeEl.getAttribute('contenteditable') === 'true' || 
-        activeEl.tagName === 'TEXTAREA' || 
-        activeEl.tagName === 'INPUT'
-    );
-
-    if (!isTyping) {
-        showToast("✓ Note Indexed");
-    }
-
-    const searchInput = document.querySelector('#plugin-studio-root .plugin-search-area input');
-    if (searchInput) {
-        searchInput.style.transition = 'border-color 0.3s';
-        searchInput.style.borderColor = '#8ab4f8'; 
-        setTimeout(() => { 
-            searchInput.style.borderColor = ''; 
-        }, 2000); 
-    }
-}
-
-// --- UX HELPER: TOAST NOTIFICATION ---
-function showToast(message) {
-    const existing = document.getElementById('plugin-toast');
-    if (existing) existing.remove();
-
-    const toast = document.createElement('div');
-    toast.id = 'plugin-toast';
-    toast.innerText = message;
-    toast.style.cssText = `
-        position: fixed;
-        bottom: 30px;
-        left: 50%;
-        transform: translateX(-50%);
-        background-color: #323232;
-        color: #fff;
-        padding: 10px 24px;
-        border-radius: 4px;
-        font-size: 14px;
-        font-family: 'Google Sans', Roboto, sans-serif;
-        z-index: 10000;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-        opacity: 0;
-        transition: opacity 0.3s ease-in-out;
-        pointer-events: none;
-    `;
-
-    document.body.appendChild(toast);
-
-    requestAnimationFrame(() => {
-        toast.style.opacity = '1';
-    });
-
-    setTimeout(() => {
-        toast.style.opacity = '0';
-        setTimeout(() => toast.remove(), 300);
-    }, 2500);
-}
-
-// --- DYNAMIC SEARCH STATS ---
-function updateSearchStats(context) {
-    if (context !== 'studio') return;
-    const searchInput = document.querySelector('#plugin-studio-root .plugin-search-area input');
-    if (!searchInput) return;
-
-    const totalNotes = document.querySelectorAll('#plugin-studio-root .plugin-detected-row').length;
-    const indexedCount = Object.keys(searchIndex).length;
-    const displayCount = Math.min(indexedCount, totalNotes);
-
-    if (totalNotes > 0) {
-        searchInput.placeholder = `Search titles (${displayCount}/${totalNotes} indexed)...`;
-    } else {
-        searchInput.placeholder = "Search titles...";
-    }
-}
-
-// --- OBSERVER ---
-function startObserver() {
-    const observer = new MutationObserver((mutations) => {
-        const isInternal = mutations.some(m => m.target && m.target.closest && m.target.closest('.plugin-container'));
-        if (isInternal) return;
-
-        if (debounceTimer) clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => {
-            runOrganizer();
-        }, 250);
-
-        if (indexDebounce) clearTimeout(indexDebounce);
-        indexDebounce = setTimeout(() => {
-            detectAndIndexActiveNote();
-            setTimeout(detectAndIndexActiveNote, 500);
-            setTimeout(detectAndIndexActiveNote, 1500);
-        }, 500); 
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
-}
-
-// --- ROBUST SELECTOR HELPER ---
-function detectAndIndexActiveNote() {
     try {
-        const titleEl = getElementByRobustSelector('activeNoteTitle');
-        if (!titleEl) return;
-        
-        let title = titleEl.value || titleEl.innerText;
-        if (!title) return;
-        
-        const bodyEl = getElementByRobustSelector('activeNoteBody');
-        if (bodyEl) {
-            const content = bodyEl.innerText;
-            if (content) {
-                saveToIndex(title, content);
-            }
-        }
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json';
+        input.onchange = (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                try {
+                    const data = JSON.parse(event.target.result);
+                    if (!data.source || !data.studio) throw new Error("Invalid backup");
+                    showConfirmModal("Replace existing configuration?", () => {
+                        appState.source = data.source;
+                        appState.studio = data.studio;
+                        if (data.settings) appState.settings = data.settings;
+                        saveState();
+                        location.reload();
+                    });
+                } catch (err) {
+                    console.debug('[NotebookLM Tree] Import error:', err);
+                    alert("Import failed: " + err.message);
+                }
+            };
+            reader.readAsText(file);
+        };
+        input.click();
     } catch (e) {
-        // Fail silently
+        console.error('[NotebookLM Tree] Import setup failed:', e);
     }
 }
 
-function getElementByRobustSelector(key, parent = document) {
-    const selectorOrList = activeSelectors[key];
-    if (Array.isArray(selectorOrList)) {
-        for (const selector of selectorOrList) {
-            if (selector.includes(',')) {
-                 const el = parent.querySelector(selector);
-                 if (el) return el;
-            } else {
-                 const el = parent.querySelector(selector);
-                 if (el) return el;
-            }
-        }
-        return null;
-    } else {
-        return parent.querySelector(selectorOrList);
+function showToast(message) {
+    try {
+        const existing = document.getElementById('plugin-toast');
+        if (existing) existing.remove();
+        const toast = document.createElement('div');
+        toast.id = 'plugin-toast';
+        toast.innerText = message;
+        toast.style.cssText = `position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); background-color: #323232; color: #fff; padding: 10px 24px; border-radius: 4px; font-size: 14px; z-index: 10000; opacity: 0; transition: opacity 0.3s ease-in-out; pointer-events: none;`;
+        document.body.appendChild(toast);
+        requestAnimationFrame(() => toast.style.opacity = '1');
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            setTimeout(() => toast.remove(), TOAST_FADE_MS);
+        }, TOAST_DISPLAY_MS);
+    } catch (e) {
+        // Toast is non-critical
+    }
+}
+
+function updateSearchStats(context) {
+    try {
+        if (context !== 'studio') return;
+        const searchInput = document.querySelector('#plugin-studio-root .plugin-search-area input');
+        if (!searchInput) return;
+        const studioSelector = Array.isArray(activeSelectors.studioRow) ? activeSelectors.studioRow.join(', ') : activeSelectors.studioRow;
+        const totalNotes = document.querySelectorAll(`${studioSelector}.plugin-detected-row, mat-card.plugin-detected-row`).length;
+        const indexedCount = Object.keys(searchIndex).length;
+        searchInput.placeholder = `Search titles (${indexedCount}/${totalNotes} indexed)...`;
+    } catch (e) {
+        // Non-critical
+    }
+}
+
+function startObserver() {
+    try {
+        const targetContainer = safeQuery(document, [
+            '.notebook-container',
+            'main[role="main"]',
+            '[data-notebook-content]',
+            '#app-root',
+            'mat-sidenav-content'
+        ]) || document.body;
+        
+        mainObserver = new MutationObserver((mutations) => {
+            try {
+                const isRelevant = mutations.some(m => {
+                    if (!m.target) return false;
+                    if (m.target.closest && m.target.closest('.plugin-container')) return false;
+                    if (m.type === 'attributes' && (m.attributeName === 'style' || m.attributeName === 'class')) {
+                        if (m.attributeName === 'class' && m.target.tagName === 'MAT-CHECKBOX') return true;
+                        return false;
+                    }
+                    return true;
+                });
+                if (!isRelevant) return;
+                
+                debouncedRunOrganizer();
+                debouncedIndexNote();
+            } catch (e) { }
+        });
+        
+        mainObserver.observe(targetContainer, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['class'] 
+        });
+        
+        console.debug('[NotebookLM Tree] Observer started on:', targetContainer.tagName || 'body');
+    } catch (e) {
+        console.error('[NotebookLM Tree] Observer setup failed:', e);
+    }
+}
+
+function safeDetectAndIndexActiveNote() {
+    try {
+        detectAndIndexActiveNote();
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Index note error:', e.message);
+    }
+}
+
+function detectAndIndexActiveNote() {
+    const titleEl = safeQuery(document, activeSelectors.activeNoteTitle);
+    if (!titleEl) return;
+    let title = safeGetText(titleEl) || titleEl.value;
+    if (!title) return;
+    const bodyEl = safeQuery(document, activeSelectors.activeNoteBody);
+    if (bodyEl) {
+        const content = safeGetText(bodyEl);
+        if (content) saveToIndex(title, content);
+    }
+}
+
+function safeRunOrganizer() {
+    try {
+        runOrganizer();
+    } catch (e) {
+        console.error('[NotebookLM Tree] Organizer error:', e);
+    }
+}
+
+function safeProcessItems(context) {
+    try {
+        processItems(context);
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Process items error:', e.message);
     }
 }
 
 function runOrganizer() {
-    // Don't run if not in a notebook
     if (!getNotebookId()) return;
+    applyFocusMode();
     
     const sourceAnchor = findSelectAllRow();
     if (sourceAnchor) {
         injectContainer(sourceAnchor, 'source');
         processItems('source');
     }
-
-    const studioAnchor = findStudioAnchor();
-    const studioContainer = document.getElementById('plugin-studio-root');
     
+    const studioAnchor = findStudioAnchor();
     if (studioAnchor) {
         injectContainer(studioAnchor, 'studio');
-        if (studioContainer) studioContainer.style.display = 'block';
         processItems('studio');
-    } else {
-        if (studioContainer) studioContainer.style.display = 'none';
     }
 }
 
-// --- ANCHOR FINDING ---
 function findSelectAllRow() {
-    const nameMatch = document.querySelector('span[name="allsources"]');
-    if (nameMatch) return getRowContainer(nameMatch);
-    const allSpans = document.querySelectorAll('span, div, label');
-    const textMatch = Array.from(allSpans).find(el => el.innerText && el.innerText.trim() === "Select all sources");
-    if (textMatch) return getRowContainer(textMatch);
-    const allChecks = document.querySelectorAll('mat-checkbox');
-    if (allChecks.length > 0) {
-        const firstCheck = allChecks[0];
-        if (!firstCheck.closest(activeSelectors.sourceRow)) return getRowContainer(firstCheck);
+    try {
+        const nameMatch = document.querySelector('span[name="allsources"]');
+        if (nameMatch) return getRowContainer(nameMatch);
+        
+        const allSpans = document.querySelectorAll('span, div, label');
+        const textMatch = Array.from(allSpans).find(el => 
+            el.innerText && el.innerText.trim() === "Select all sources"
+        );
+        if (textMatch) return getRowContainer(textMatch);
+        
+        const sourceRowSelector = Array.isArray(activeSelectors.sourceRow) 
+            ? activeSelectors.sourceRow[0] 
+            : activeSelectors.sourceRow;
+        const allChecks = safeQueryAll(document, 'mat-checkbox');
+        if (allChecks.length > 0) {
+            const firstCheck = allChecks[0];
+            if (!firstCheck.closest(sourceRowSelector)) {
+                return getRowContainer(firstCheck);
+            }
+        }
+        return null;
+    } catch (e) {
+        return null;
     }
-    return null;
 }
 
 function findStudioAnchor() {
-    const genBox = document.querySelector('.create-artifact-buttons-container') || 
-                   document.querySelector('studio-panel .actions-container');
-    if (genBox) return genBox;
-    const sortBtn = document.querySelector('button[aria-label="Sort"]');
-    if (sortBtn) return getRowContainer(sortBtn);
-    const firstNote = document.querySelector(activeSelectors.studioRow);
-    if (firstNote) return firstNote;
-    return null;
+    try {
+        const genBox = safeQuery(document, activeSelectors.generatorBox);
+        if (genBox) return genBox;
+        
+        const sortBtn = document.querySelector('button[aria-label="Sort"]');
+        if (sortBtn) return getRowContainer(sortBtn);
+        
+        const firstNote = safeQuery(document, activeSelectors.studioRow);
+        if (firstNote) return firstNote;
+        
+        return null;
+    } catch (e) {
+        return null;
+    }
 }
 
 function getRowContainer(element) {
-    let row = element;
-    while (row && row.parentElement) {
-        if (row.classList.contains('row') || 
-            row.parentElement.tagName === 'MAT-NAV-LIST' ||
-            row.parentElement.classList.contains('panel-content')) {
-            return row;
+    try {
+        if (!element) return null;
+        let row = element;
+        let depth = 0;
+        while (row && row.parentElement && depth++ < 20) {
+            if (row.classList.contains('row') ||
+                row.parentElement.tagName === 'MAT-NAV-LIST' ||
+                row.parentElement.classList.contains('panel-content')) {
+                return row;
+            }
+            row = row.parentElement;
         }
-        row = row.parentElement;
+        return element;
+    } catch (e) {
+        return element;
     }
-    return element;
 }
 
-// --- UI INJECTION ---
 function injectContainer(anchorEl, context) {
-    const id = `plugin-${context}-root`;
-    if (anchorEl.classList.contains('plugin-ui-injected') || document.getElementById(id)) return;
-
-    let wrapper = anchorEl.parentElement;
-    if (!wrapper) return;
-
-    const container = document.createElement('div');
-    container.id = id;
-    container.className = 'plugin-container';
-
-    const controls = document.createElement('div');
-    controls.className = 'plugin-controls-area';
-    
-    controls.innerHTML = `
-        <button class="plugin-btn add-folder" title="Create New Folder">${ICONS.newFolder}</button>
-        <button class="plugin-btn secondary expand-all" title="Expand All Folders">${ICONS.expandAll}</button>
-        <button class="plugin-btn secondary collapse-all" title="Collapse All Folders">${ICONS.collapseAll}</button>
-        <button class="plugin-btn secondary export-btn" title="Export Folders">${ICONS.export}</button>
-        <button class="plugin-btn secondary import-btn" title="Import Folders">${ICONS.import}</button>
-        <button class="plugin-btn secondary reset-btn" title="Reset Tree (Restart)">${ICONS.restart}</button>
-    `;
-
-    if (context === 'source') {
-        const toggleResearchBtn = document.createElement('button');
-        toggleResearchBtn.className = 'plugin-btn secondary toggle-research';
-        toggleResearchBtn.innerHTML = ICONS.search;
+    try {
+        const id = `plugin-${context}-root`;
+        if (safeHasClass(anchorEl, 'plugin-ui-injected') || document.getElementById(id)) return;
+        let wrapper = anchorEl.parentElement;
+        if (!wrapper) return;
         
-        const updateResearchVisuals = () => {
-            const isVisible = appState.settings.showResearch;
-            toggleResearchBtn.title = isVisible ? "Hide Web Research (visible)" : "Show Web Research (hidden)";
-            toggleResearchBtn.classList.toggle('toggle-off', !isVisible);
+        const container = document.createElement('div');
+        container.id = id;
+        container.className = 'plugin-container';
+        const controls = document.createElement('div');
+        controls.className = 'plugin-controls-area';
+        const rebuildBtn = context === 'studio' ? `<button class="plugin-btn secondary rebuild-index" title="Rebuild Index (Local)">${ICONS.refresh}</button>` : '';
+        const focusBtn = context === 'studio' ? `<button class="plugin-btn secondary toggle-focus toggle-off" title="Enter Zen Mode">${ICONS.focus}</button>` : '';
+
+        controls.innerHTML = `
+            <button class="plugin-btn add-folder" title="Create New Folder">${ICONS.newFolder}</button>
+            <button class="plugin-btn secondary expand-all" title="Expand All">${ICONS.expandAll}</button>
+            <button class="plugin-btn secondary collapse-all" title="Collapse All">${ICONS.collapseAll}</button>
+            <button class="plugin-btn secondary export-btn" title="Export Config">${ICONS.export}</button>
+            <button class="plugin-btn secondary import-btn" title="Import Config">${ICONS.import}</button>
+            <button class="plugin-btn secondary reset-btn" title="Reset Tree">${ICONS.restart}</button>
+            ${rebuildBtn}
+            ${focusBtn}
+        `;
+
+        if (context === 'source') {
+            const toggleResearchBtn = document.createElement('button');
+            toggleResearchBtn.className = 'plugin-btn secondary toggle-research';
+            toggleResearchBtn.innerHTML = ICONS.search;
+            const applyResearchState = () => {
+                const isVisible = appState.settings.showResearch;
+                const promos = document.querySelectorAll('.source-discovery-promo-container');
+                const boxes = document.querySelectorAll('source-discovery-query-box');
+                promos.forEach(el => el.style.display = isVisible ? '' : 'none');
+                boxes.forEach(el => el.style.display = isVisible ? '' : 'none');
+                toggleResearchBtn.classList.toggle('toggle-off', !isVisible);
+                toggleResearchBtn.title = isVisible ? "Hide Web Research" : "Show Web Research";
+            };
+            toggleResearchBtn.onclick = () => {
+                appState.settings.showResearch = !appState.settings.showResearch;
+                saveState();
+                applyResearchState();
+            };
+            applyResearchState();
+            controls.appendChild(toggleResearchBtn);
             
-            const promos = document.querySelectorAll('.source-discovery-promo-container');
-            const boxes = document.querySelectorAll('source-discovery-query-box');
-            promos.forEach(el => el.style.display = isVisible ? '' : 'none');
-            boxes.forEach(el => el.style.display = isVisible ? '' : 'none');
-        };
-
-        toggleResearchBtn.onclick = () => {
-            appState.settings.showResearch = !appState.settings.showResearch;
-            saveState();
-            updateResearchVisuals();
-        };
-
-        updateResearchVisuals();
-        controls.insertBefore(toggleResearchBtn, controls.lastElementChild);
-    }
-    
-    if (context === 'studio') {
-        const toggleBtn = document.createElement('button');
-        toggleBtn.className = 'plugin-btn secondary toggle-gen';
-        toggleBtn.innerHTML = ICONS.tune;
-        
-        const updateToggleVisuals = () => {
-            const isVisible = appState.settings.showGenerators;
-            toggleBtn.title = isVisible ? "Hide Generators (visible)" : "Show Generators (hidden)";
-            toggleBtn.classList.toggle('toggle-off', !isVisible);
-            const box = document.querySelector('.create-artifact-buttons-container');
-            if (box) box.style.display = isVisible ? '' : 'none';
-        };
-
-        toggleBtn.onclick = () => {
-            appState.settings.showGenerators = !appState.settings.showGenerators;
-            saveState();
-            updateToggleVisuals();
-        };
-
-        updateToggleVisuals();
-        controls.insertBefore(toggleBtn, controls.lastElementChild);
-        
-        const searchDiv = document.createElement('div');
-        searchDiv.className = 'plugin-search-area';
-        searchDiv.innerHTML = `<input type="text" placeholder="Search titles...">`;
-        
-        let searchDebounce;
-        searchDiv.querySelector('input').oninput = (e) => {
-            clearTimeout(searchDebounce);
-            searchDebounce = setTimeout(() => {
-                filterProxies(context, e.target.value);
-            }, 150);
-        };
-        container.appendChild(searchDiv);
-    }
-
-    controls.querySelector('.add-folder').onclick = () => createFolder(context);
-    controls.querySelector('.expand-all').onclick = () => expandAllFolders(context);
-    controls.querySelector('.collapse-all').onclick = () => collapseAllFolders(context);
-    controls.querySelector('.export-btn').onclick = () => exportFolders();
-    controls.querySelector('.import-btn').onclick = () => importFolders();
-    controls.querySelector('.reset-btn').onclick = () => {
-        if(confirm("Reset all folders for this notebook? This cannot be undone.\n\nTip: Export your folders first if you want a backup.")) {
-            appState[context] = { folders: {}, mappings: {}, pinned: [] };
-            saveState();
-            location.reload();
+            // --- [NEW] SELECT ALL BUTTON ---
+            const selectAllBtn = document.createElement('button');
+            selectAllBtn.className = 'plugin-btn secondary select-all-btn';
+            selectAllBtn.innerHTML = ICONS.selectAll;
+            selectAllBtn.title = "Toggle All Sources";
+            selectAllBtn.onclick = () => toggleAllSources();
+            controls.appendChild(selectAllBtn);
+            // -------------------------------
+            
+            const taskSection = document.createElement('div');
+            taskSection.className = 'plugin-task-section';
+            const arrowClass = appState.settings.tasksOpen ? 'arrow open' : 'arrow';
+            taskSection.innerHTML = `
+                <div class="plugin-task-header">
+                    <div style="display:flex; align-items:center; gap:4px;">
+                        <span class="${arrowClass}">${ICONS.chevron}</span> 
+                        Tasks <span id="plugin-task-count" style="font-size:11px; opacity:0.7;"></span>
+                    </div>
+                    <div class="plugin-task-header-actions"><div class="plugin-header-btn sort-tasks" title="Sort by Priority">${ICONS.sort}</div></div>
+                </div>
+                <div class="plugin-task-body" style="display:${appState.settings.tasksOpen ? 'block' : 'none'}">
+                    <div class="plugin-task-input-area"><input type="text" placeholder="Add task..." /><button class="plugin-btn secondary add-task-btn">${ICONS.add}</button></div>
+                    <div id="plugin-task-list-mount" class="plugin-task-list"></div>
+                </div>
+            `;
+            const taskArrow = taskSection.querySelector('.arrow');
+            const taskBody = taskSection.querySelector('.plugin-task-body');
+            const taskHeader = taskSection.querySelector('.plugin-task-header');
+            if (taskHeader) {
+                taskHeader.onclick = (e) => {
+                    if (e.target.closest('.plugin-header-btn')) return;
+                    appState.settings.tasksOpen = !appState.settings.tasksOpen;
+                    saveState();
+                    if (taskBody) taskBody.style.display = appState.settings.tasksOpen ? 'block' : 'none';
+                    if (taskArrow) {
+                        if (appState.settings.tasksOpen) {
+                            taskArrow.classList.add('open');
+                        } else {
+                            taskArrow.classList.remove('open');
+                        }
+                    }
+                };
+            }
+            const sortTasksBtn = taskSection.querySelector('.sort-tasks');
+            if (sortTasksBtn) {
+                sortTasksBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    if (appState.source.tasks && appState.source.tasks.length > 0) {
+                        appState.source.tasks.sort((a, b) => {
+                            const getVal = (p) => (p && p > 0) ? p : 99;
+                            return getVal(a.prio) - getVal(b.prio);
+                        });
+                        saveState();
+                        renderTasks();
+                        showToast("Tasks sorted by Priority");
+                    }
+                };
+            }
+            const taskInput = taskSection.querySelector('input');
+            const addTaskBtn = taskSection.querySelector('.add-task-btn');
+            const addTaskHandler = () => {
+                if (taskInput) {
+                    const val = taskInput.value.trim();
+                    if (val) {
+                        addTask({ text: val, done: false, prio: 0, date: "" });
+                        taskInput.value = '';
+                    }
+                }
+            };
+            if (addTaskBtn) addTaskBtn.onclick = addTaskHandler;
+            if (taskInput) taskInput.onkeydown = (e) => { if (e.key === 'Enter') addTaskHandler(); };
+            container.appendChild(taskSection);
+            setTimeout(renderTasks, DOM_SETTLE_DELAY_MS);
         }
-    };
+        
+        if (context === 'studio') {
+            const toggleBtn = document.createElement('button');
+            toggleBtn.className = 'plugin-btn secondary toggle-gen';
+            toggleBtn.innerHTML = ICONS.tune;
+            const applyGeneratorsState = () => {
+                const isVisible = appState.settings.showGenerators;
+                const box = safeQuery(document, activeSelectors.generatorBox);
+                if (box) box.style.display = isVisible ? '' : 'none';
+                toggleBtn.classList.toggle('toggle-off', !isVisible);
+                toggleBtn.title = isVisible ? "Hide Generators" : "Show Generators";
+            };
+            toggleBtn.onclick = () => {
+                appState.settings.showGenerators = !appState.settings.showGenerators;
+                saveState();
+                applyGeneratorsState();
+            };
+            applyGeneratorsState();
+            controls.appendChild(toggleBtn);
+            
+            const searchDiv = document.createElement('div');
+            searchDiv.className = 'plugin-search-area';
+            searchDiv.innerHTML = `<input type="text" placeholder="Search titles...">`;
+            const debouncedFilter = debounce((value) => filterProxies(context, value), DEBOUNCE_SEARCH_MS);
+            const searchInput = searchDiv.querySelector('input');
+            if (searchInput) {
+                searchInput.oninput = (e) => { debouncedFilter(e.target.value); };
+            }
+            container.appendChild(searchDiv);
+        }
 
-    container.appendChild(controls);
-    const pinnedMount = document.createElement('div');
-    pinnedMount.id = `pinned-mount-${context}`;
-    pinnedMount.className = 'plugin-pinned-section';
-    pinnedMount.style.display = 'none'; 
-    container.appendChild(pinnedMount);
-    const treeMount = document.createElement('div');
-    treeMount.id = `tree-mount-${context}`;
-    container.appendChild(treeMount);
+        const addFolderBtn = controls.querySelector('.add-folder');
+        if (addFolderBtn) addFolderBtn.onclick = () => createFolder(context);
+        
+        const expandAllBtn = controls.querySelector('.expand-all');
+        if (expandAllBtn) expandAllBtn.onclick = () => expandAllFolders(context);
+        
+        const collapseAllBtn = controls.querySelector('.collapse-all');
+        if (collapseAllBtn) collapseAllBtn.onclick = () => collapseAllFolders(context);
+        
+        const exportBtn = controls.querySelector('.export-btn');
+        if (exportBtn) exportBtn.onclick = () => exportFolders();
+        
+        const importBtn = controls.querySelector('.import-btn');
+        if (importBtn) importBtn.onclick = () => importFolders();
+        
+        const resetBtn = controls.querySelector('.reset-btn');
+        if (resetBtn) {
+            resetBtn.onclick = () => {
+                showConfirmModal("Reset all folders?", () => {
+                    appState[context] = { folders: {}, mappings: {}, pinned: [], tasks: [] };
+                    saveState();
+                    location.reload();
+                });
+            };
+        }
+        
+        if (context === 'studio') {
+            const rebuildIndexBtn = controls.querySelector('.rebuild-index');
+            if (rebuildIndexBtn) rebuildIndexBtn.onclick = () => rebuildSearchIndex();
+            
+            const toggleFocusBtn = controls.querySelector('.toggle-focus');
+            if (toggleFocusBtn) toggleFocusBtn.onclick = () => toggleFocusMode();
+        }
+        container.appendChild(controls);
 
-    if (context === 'source') {
-        wrapper.insertBefore(container, anchorEl);
-    } else if (context === 'studio') {
-        if (anchorEl.classList.contains('create-artifact-buttons-container') && anchorEl.nextElementSibling) {
-            wrapper.insertBefore(container, anchorEl.nextElementSibling);
-        } else if (anchorEl.tagName === 'ARTIFACT-LIBRARY-NOTE' || anchorEl.tagName === 'MAT-CARD') {
+        const pinnedMount = document.createElement('div');
+        pinnedMount.id = `pinned-mount-${context}`;
+        pinnedMount.className = 'plugin-pinned-section';
+        pinnedMount.style.display = 'none';
+        container.appendChild(pinnedMount);
+        
+        const treeMount = document.createElement('div');
+        treeMount.id = `tree-mount-${context}`;
+        container.appendChild(treeMount);
+
+        if (context === 'source') {
             wrapper.insertBefore(container, anchorEl);
+        } else if (context === 'studio') {
+            if (safeHasClass(anchorEl, 'create-artifact-buttons-container') && anchorEl.nextElementSibling) {
+                wrapper.insertBefore(container, anchorEl.nextElementSibling);
+            } else if (anchorEl.tagName === 'ARTIFACT-LIBRARY-NOTE' || anchorEl.tagName === 'MAT-CARD') {
+                wrapper.insertBefore(container, anchorEl);
+            } else {
+                wrapper.appendChild(container);
+            }
         } else {
             wrapper.appendChild(container);
         }
-    } else {
-        wrapper.appendChild(container);
+        anchorEl.classList.add('plugin-ui-injected');
+        renderTree(context);
+    } catch (e) {
+        console.error('[NotebookLM Tree] Inject container error:', e);
     }
-
-    anchorEl.classList.add('plugin-ui-injected');
-    renderTree(context);
 }
 
-// --- TREE RENDERING ---
 function renderTree(context) {
-    const mount = document.getElementById(`tree-mount-${context}`);
-    if (!mount) return;
-    const fragment = document.createDocumentFragment();
-    const folders = Object.values(appState[context].folders);
-    const roots = folders.filter(f => !f.parentId).sort((a,b) => {
-        const orderA = a.order !== undefined ? a.order : 0;
-        const orderB = b.order !== undefined ? b.order : 0;
-        if (orderA !== orderB) return orderA - orderB;
-        return a.name.localeCompare(b.name);
-    });
-    roots.forEach(root => fragment.appendChild(buildFolderNode(root, folders, context)));
-    mount.innerHTML = '';
-    mount.appendChild(fragment);
+    try {
+        const mount = document.getElementById(`tree-mount-${context}`);
+        if (!mount) return;
+        const fragment = document.createDocumentFragment();
+        const folders = Object.values(appState[context].folders || {});
+        const roots = folders.filter(f => !f.parentId).sort((a, b) => (a.order || 0) - (b.order || 0) || a.name.localeCompare(b.name));
+        roots.forEach(root => fragment.appendChild(buildFolderNode(root, folders, context)));
+        mount.innerHTML = '';
+        mount.appendChild(fragment);
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Render tree error:', e.message);
+    }
 }
 
 function buildFolderNode(folder, allFolders, context) {
@@ -730,11 +1539,14 @@ function buildFolderNode(folder, allFolders, context) {
     const header = document.createElement('div');
     header.className = 'plugin-folder-header';
     header.style.cssText = style;
+
+    // Added folder-check icon for V17.3
     header.innerHTML = `
-        <span class="arrow">▶</span>
+        <span class="arrow">${ICONS.chevron}</span>
         <span class="folder-icon" style="color:${folder.color || '#8ab4f8'}">${ICONS.folder}</span>
         <span class="folder-name"></span>
         <div class="folder-actions">
+             <span class="action-icon folder-check" title="Toggle Folder Items">${ICONS.checkOff}</span>
              <span class="action-icon move-up" title="Move Up">${ICONS.up}</span>
              <span class="action-icon move-down" title="Move Down">${ICONS.down}</span>
              <span class="action-icon color-pick" title="Color">${ICONS.palette}</span>
@@ -743,167 +1555,332 @@ function buildFolderNode(folder, allFolders, context) {
              <span class="action-icon del" title="Delete">${ICONS.close}</span>
         </div>
     `;
-    header.querySelector('.folder-name').textContent = folder.name;
-
+    
+    const folderNameEl = header.querySelector('.folder-name');
+    if (folderNameEl) folderNameEl.textContent = folder.name;
+    
     header.onclick = (e) => {
         if (e.target.closest('.folder-actions')) return;
         folder.isOpen = !folder.isOpen;
         saveState();
         renderTree(context);
-        setTimeout(() => processItems(context), 50); 
+        setTimeout(() => safeProcessItems(context), DOM_SETTLE_DELAY_MS);
     };
-    header.querySelector('.move-up').onclick = (e) => { e.stopPropagation(); moveFolder(context, folder.id, -1); };
-    header.querySelector('.move-down').onclick = (e) => { e.stopPropagation(); moveFolder(context, folder.id, 1); };
-    header.querySelector('.color-pick').onclick = (e) => {
-        e.stopPropagation();
-        const colors = [null, '#e8eaed', '#f28b82', '#fbbc04', '#34a853', '#4285f4', '#d93025'];
-        const cur = folder.color || null;
-        const next = colors[(colors.indexOf(cur) + 1) % colors.length];
-        folder.color = next;
-        saveState();
-        renderTree(context);
-    };
-    header.querySelector('.add').onclick = () => createFolder(context, folder.id);
-    header.querySelector('.ren').onclick = (e) => { e.stopPropagation(); const n = prompt("Rename:", folder.name); if(n) { folder.name = n; saveState(); renderTree(context); }};
-    header.querySelector('.del').onclick = (e) => { e.stopPropagation(); if(confirm("Delete folder?")) deleteFolder(context, folder.id); };
+
+    // --- [NEW HANDLER] ---
+    const checkBtn = header.querySelector('.folder-check');
+    if (checkBtn) {
+        checkBtn.onclick = (e) => {
+            e.stopPropagation();
+            toggleFolderItems(folder.id, context);
+        };
+    }
+
+    const moveUpBtn = header.querySelector('.move-up');
+    if (moveUpBtn) moveUpBtn.onclick = (e) => { e.stopPropagation(); moveFolder(context, folder.id, -1); };
+    
+    const moveDownBtn = header.querySelector('.move-down');
+    if (moveDownBtn) moveDownBtn.onclick = (e) => { e.stopPropagation(); moveFolder(context, folder.id, 1); };
+    
+    const colorPickBtn = header.querySelector('.color-pick');
+    if (colorPickBtn) {
+        colorPickBtn.onclick = (e) => {
+            e.stopPropagation();
+            const colors = [null, '#e8eaed', '#f28b82', '#fbbc04', '#34a853', '#4285f4', '#d93025'];
+            const cur = folder.color || null;
+            const next = colors[(colors.indexOf(cur) + 1) % colors.length];
+            folder.color = next;
+            saveState();
+            renderTree(context);
+        };
+    }
+    
+    const addSubBtn = header.querySelector('.add');
+    if (addSubBtn) addSubBtn.onclick = () => createFolder(context, folder.id);
+    
+    const renameBtn = header.querySelector('.ren');
+    if (renameBtn) {
+        renameBtn.onclick = (e) => {
+            e.stopPropagation();
+            const n = prompt("Rename:", folder.name);
+            if (n) {
+                folder.name = n;
+                saveState();
+                renderTree(context);
+            }
+        };
+    }
+    
+    const deleteBtn = header.querySelector('.del');
+    if (deleteBtn) {
+        deleteBtn.onclick = (e) => {
+            e.stopPropagation();
+            showConfirmModal("Delete folder?", () => deleteFolder(context, folder.id));
+        };
+    }
 
     node.appendChild(header);
     const content = document.createElement('div');
     content.className = 'plugin-node-children';
     content.id = `folder-content-${folder.id}`;
-    const subs = allFolders.filter(f => f.parentId === folder.id).sort((a,b) => (a.order||0) - (b.order||0));
+    const subs = allFolders.filter(f => f.parentId === folder.id).sort((a, b) => (a.order || 0) - (b.order || 0));
     subs.forEach(sub => content.appendChild(buildFolderNode(sub, allFolders, context)));
     node.appendChild(content);
     return node;
 }
 
 function moveFolder(context, folderId, direction) {
-    const folders = Object.values(appState[context].folders);
-    const target = appState[context].folders[folderId];
-    if (!target) return;
-    const pid = target.parentId || null;
-    const sibs = folders.filter(f => (f.parentId || null) === pid).sort((a,b) => {
-        const oa = a.order !== undefined ? a.order : 0;
-        const ob = b.order !== undefined ? b.order : 0;
-        return oa !== ob ? oa - ob : a.name.localeCompare(b.name);
-    });
-    sibs.forEach((f, i) => f.order = i);
-    const idx = sibs.findIndex(f => f.id === folderId);
-    const newIdx = idx + direction;
-    if (newIdx >= 0 && newIdx < sibs.length) {
-        const swap = sibs[newIdx];
-        [target.order, swap.order] = [swap.order, target.order];
-        saveState();
-        renderTree(context);
+    try {
+        const folders = Object.values(appState[context].folders || {});
+        const target = appState[context].folders[folderId];
+        if (!target) return;
+        const pid = target.parentId || null;
+        const sibs = folders.filter(f => (f.parentId || null) === pid).sort((a, b) => (a.order || 0) - (b.order || 0));
+        sibs.forEach((f, i) => f.order = i);
+        const idx = sibs.findIndex(f => f.id === folderId);
+        const newIdx = idx + direction;
+        if (newIdx >= 0 && newIdx < sibs.length) {
+            const swap = sibs[newIdx];
+            [target.order, swap.order] = [swap.order, target.order];
+            saveState();
+            renderTree(context);
+        }
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Move folder error:', e.message);
     }
 }
 
-// --- ITEM PROCESSING ---
 function processItems(context) {
-    let items = [];
+    // Race condition guard - prevent concurrent processing
+    if (isProcessingItems) return;
+    isProcessingItems = true;
+    
+    try {
+        let items = [];
+    
     if (context === 'source') {
         if (appState.settings.showResearch === false) {
-             const promos = document.querySelectorAll('.source-discovery-promo-container');
-             const boxes = document.querySelectorAll('source-discovery-query-box');
-             promos.forEach(el => el.style.display = 'none');
-             boxes.forEach(el => el.style.display = 'none');
+            const promos = document.querySelectorAll('.source-discovery-promo-container');
+            const boxes = document.querySelectorAll('source-discovery-query-box');
+            promos.forEach(el => el.style.display = 'none');
+            boxes.forEach(el => el.style.display = 'none');
         }
-
-        items = document.querySelectorAll(activeSelectors.sourceRow);
+        items = safeQueryAll(document, activeSelectors.sourceRow);
+        
         if (items.length === 0) {
             const icons = document.querySelectorAll('mat-icon[data-mat-icon-type="font"]');
             const cands = new Set();
-            icons.forEach(i => { if(['drive_pdf','article'].includes(i.innerText.trim())) cands.add(i.closest('div[tabindex="0"]')); });
+            icons.forEach(i => {
+                const iconText = safeGetText(i);
+                if (['drive_pdf', 'article', 'description', 'insert_drive_file'].includes(iconText)) {
+                    const container = i.closest('div[tabindex="0"]');
+                    if (container) cands.add(container);
+                }
+            });
             items = Array.from(cands);
         }
     } else {
-        items = document.querySelectorAll(activeSelectors.studioRow + ', mat-card');
+        items = safeQueryAll(document, activeSelectors.studioRow);
+        if (items.length === 0) {
+            items = document.querySelectorAll('mat-card');
+        }
     }
 
     const pinnedMount = document.getElementById(`pinned-mount-${context}`);
     if (pinnedMount) pinnedMount.innerHTML = '';
     let hasPinned = false;
+    
+    // Track stats for folder checkboxes
+    const folderStates = {}; 
 
     items.forEach(nativeRow => {
-        nativeRow.classList.add('plugin-detected-row');
-        let titleEl = context === 'source' ? nativeRow.querySelector(activeSelectors.sourceTitle) : nativeRow.querySelector(activeSelectors.studioTitle);
-        if (!titleEl) return;
-        const text = titleEl.innerText.trim();
-        if (!text) return;
+        try {
+            nativeRow.classList.add('plugin-detected-row');
+            let titleEl = context === 'source' 
+                ? safeQuery(nativeRow, activeSelectors.sourceTitle)
+                : safeQuery(nativeRow, activeSelectors.studioTitle);
+            if (!titleEl) return;
+            const text = safeGetText(titleEl);
+            if (!text) return;
 
-        if (!nativeRow.querySelector('.plugin-move-trigger')) injectMoveTrigger(nativeRow, text, context);
-
-        if (isPinned(context, text)) {
-            hasPinned = true;
-            pinnedMount.appendChild(createProxyItem(nativeRow, text, context, true));
-        }
-
-        const folderId = appState[context].mappings[text];
-        if (folderId && appState[context].folders[folderId]) {
-            nativeRow.classList.add('plugin-hidden-native');
-            const target = document.getElementById(`folder-content-${folderId}`);
-            if (target && !target.querySelector(`.plugin-proxy-item[data-ref="${text}"]`)) {
-                target.appendChild(createProxyItem(nativeRow, text, context, false));
+            // --- [NEW] DETECT CHECK STATE ---
+            let isChecked = false;
+            if (context === 'source') {
+                const nativeBox = nativeRow.querySelector('mat-checkbox');
+                isChecked = nativeBox && nativeBox.classList.contains('mat-mdc-checkbox-checked');
             }
-        } else {
-            nativeRow.classList.remove('plugin-hidden-native');
+
+            if (!nativeRow.querySelector('.plugin-move-trigger')) {
+                injectMoveTrigger(nativeRow, text, context);
+            }
+
+            if (isPinned(context, text)) {
+                hasPinned = true;
+                if (pinnedMount) {
+                    pinnedMount.appendChild(createProxyItem(nativeRow, text, context, true));
+                }
+            }
+
+            const folderId = appState[context].mappings[text];
+            if (folderId && appState[context].folders[folderId]) {
+                nativeRow.classList.add('plugin-hidden-native');
+                const target = document.getElementById(`folder-content-${folderId}`);
+                if (target) {
+                    const safeText = CSS.escape(text);
+                    let proxy = target.querySelector(`.plugin-proxy-item[data-ref="${safeText}"]`);
+                    
+                    if (!proxy) {
+                        proxy = createProxyItem(nativeRow, text, context, false);
+                        target.appendChild(proxy);
+                    }
+                    
+                    // --- [NEW] SYNC ITEM CHECKBOX ---
+                    if (context === 'source') {
+                         const checkBtn = proxy.querySelector('.plugin-item-check');
+                         if (checkBtn) {
+                             const targetIcon = isChecked ? ICONS.checkOn : ICONS.checkOff;
+                             if (checkBtn.innerHTML !== targetIcon) checkBtn.innerHTML = targetIcon;
+                         }
+
+                         // Track folder stats
+                         if (!folderStates[folderId]) folderStates[folderId] = { total: 0, checked: 0 };
+                         folderStates[folderId].total++;
+                         if (isChecked) folderStates[folderId].checked++;
+                    }
+                }
+            } else {
+                nativeRow.classList.remove('plugin-hidden-native');
+            }
+        } catch (e) {
+            console.debug('[NotebookLM Tree] Process item error:', e.message);
         }
     });
 
+    // --- [NEW] UPDATE FOLDER ICONS ---
+    if (context === 'source') {
+        Object.keys(folderStates).forEach(fid => {
+            const node = document.getElementById(`node-${fid}`);
+            const checkBtn = node ? node.querySelector('.folder-check') : null;
+            if (checkBtn) {
+                const s = folderStates[fid];
+                if (s.checked === 0) checkBtn.innerHTML = ICONS.checkOff;
+                else if (s.checked === s.total) checkBtn.innerHTML = ICONS.checkOn;
+                else checkBtn.innerHTML = ICONS.checkIndet;
+            }
+        });
+    }
+
     if (pinnedMount) pinnedMount.style.display = hasPinned ? 'block' : 'none';
-    
-    if(context === 'studio') updateSearchStats('studio');
+    if (context === 'studio') updateSearchStats('studio');
+    } finally {
+        isProcessingItems = false;
+    }
 }
 
-function isPinned(context, title) { return appState[context].pinned && appState[context].pinned.includes(title); }
+function isPinned(context, title) {
+    return appState[context].pinned && appState[context].pinned.includes(title);
+}
+
 function togglePin(context, title) {
     if (!appState[context].pinned) appState[context].pinned = [];
     const idx = appState[context].pinned.indexOf(title);
-    if (idx > -1) appState[context].pinned.splice(idx, 1); else appState[context].pinned.push(title);
+    if (idx > -1) appState[context].pinned.splice(idx, 1);
+    else appState[context].pinned.push(title);
     saveState();
-    processItems(context);
+    safeProcessItems(context);
 }
 
 function createProxyItem(nativeRow, text, context, isPinnedView) {
     const proxy = document.createElement('div');
     proxy.className = 'plugin-proxy-item inside-plugin-folder';
     proxy.dataset.ref = text;
-    proxy.dataset.searchTerm = text.toLowerCase(); 
+    proxy.dataset.searchTerm = text.toLowerCase();
+    if (isPinnedView) proxy.classList.add('is-pinned-proxy');
 
-    if(isPinnedView) proxy.classList.add('is-pinned-proxy');
+    // --- [NEW] ITEM CHECKBOX ---
+    if (context === 'source' && !isPinnedView) {
+        const checkSpan = document.createElement('span');
+        checkSpan.className = 'plugin-item-check';
+        checkSpan.style.marginRight = '8px';
+        checkSpan.style.cursor = 'pointer';
+        checkSpan.style.display = 'flex';
+        checkSpan.style.alignItems = 'center';
+        checkSpan.innerHTML = ICONS.checkOff; 
+        
+        checkSpan.onclick = (e) => {
+            e.stopPropagation();
+            const nativeBox = nativeRow.querySelector('mat-checkbox input');
+            if (nativeBox) nativeBox.click();
+        };
+        proxy.appendChild(checkSpan);
+    }
 
-    let iconElement = null;
+    let iconElement;
     if (context === 'source') {
-        const nativeIcon = nativeRow.querySelector('.source-item-source-icon') || nativeRow.querySelector('mat-icon[data-mat-icon-type="font"]');
+        const allIcons = nativeRow.querySelectorAll('mat-icon');
+        let nativeIcon = null;
+        const fileTypeIcons = ['drive_pdf', 'article', 'description', 'insert_drive_file', 
+                               'link', 'video_library', 'audio_file', 'image', 'folder',
+                               'text_snippet', 'code', 'table_chart'];
+        
+        for (const icon of allIcons) {
+            const iconName = (icon.textContent || icon.innerText || '').trim();
+            if (iconName === 'more_vert' || iconName === 'more_horiz' || 
+                iconName === 'close' || iconName === 'check' || iconName === 'edit') {
+                continue;
+            }
+            if (fileTypeIcons.includes(iconName) || !nativeIcon) {
+                nativeIcon = icon;
+                if (fileTypeIcons.includes(iconName)) break;
+            }
+        }
+        
         if (nativeIcon) {
-            iconElement = nativeIcon.cloneNode(true);
-            const style = window.getComputedStyle(nativeIcon);
-            iconElement.style.color = style.color;
-            iconElement.style.fontFamily = style.fontFamily; 
-            iconElement.style.marginRight = '8px';
-            iconElement.style.display = 'flex';
+            const iconName = (nativeIcon.textContent || nativeIcon.innerText || '').trim();
+            if (iconName && iconName !== 'more_vert') {
+                let iconColor = 'var(--plugin-icon-color)';
+                try {
+                    const style = window.getComputedStyle(nativeIcon);
+                    if (style.color) iconColor = style.color;
+                } catch (e) { }
+                
+                iconElement = document.createElement('mat-icon');
+                iconElement.className = nativeIcon.className;
+                iconElement.textContent = iconName;
+                iconElement.setAttribute('aria-hidden', 'true');
+                iconElement.setAttribute('data-mat-icon-type', 'font');
+                iconElement.style.marginRight = '8px';
+                iconElement.style.display = 'inline-flex';
+                iconElement.style.alignItems = 'center';
+                iconElement.style.fontSize = '20px';
+                iconElement.style.width = '20px';
+                iconElement.style.height = '20px';
+                iconElement.style.color = iconColor;
+            } else {
+                iconElement = nativeIcon.cloneNode(true);
+                iconElement.style.marginRight = '8px';
+                iconElement.style.display = 'flex';
+            }
         } else {
             iconElement = document.createElement('span');
-            iconElement.innerText = '📄';
+            iconElement.innerText = 'ðŸ“„';
+            iconElement.style.marginRight = '8px';
         }
     } else {
         const span = document.createElement('span');
-        span.innerHTML = `<svg style="color:#8ab4f8;" xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="currentColor"><path d="M320-240h320v-80H320v80Zm0-160h320v-80H320v80ZM240-80q-33 0-56.5-23.5T160-160v-640q0-33 23.5-56.5T240-880h320l240 240v480q0 33-23.5 56.5T720-80H240Zm280-520v-200H240v640h480v-440H520ZM240-800v200-200 640-640Z"/></svg>`;
+        span.innerHTML = `<svg style="color:#8ab4f8;" xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="currentColor"><path d="M320-240h320v-80H320v80Zm0-160h320v-80H320v80ZM240-80q-33 0-56.5-23.5T160-160v-640q0-33 23.5-56.5T240-880h320l240 240v480q0 33-23.5 56.5T720-80H240Zm280-520v-200H240v640h480v-440H520ZM240-800v200-200 640-640Z"></path></svg>`;
         iconElement = span.firstElementChild;
     }
 
     const isP = isPinned(context, text);
     const pinIcon = isP ? ICONS.keepFilled : ICONS.keep;
-    const pinTitle = isP ? "Unpin (Keep Off)" : "Pin (Keep)";
 
     const contentDiv = document.createElement('div');
     contentDiv.className = 'proxy-content';
-    
     const iconSpan = document.createElement('span');
     iconSpan.className = 'proxy-icon';
-    iconSpan.appendChild(iconElement);
+    if (iconElement) iconSpan.appendChild(iconElement);
     contentDiv.appendChild(iconSpan);
-
     const textSpan = document.createElement('span');
     textSpan.className = 'proxy-text';
     textSpan.textContent = text;
@@ -914,251 +1891,194 @@ function createProxyItem(nativeRow, text, context, isPinnedView) {
 
     const ejectBtn = document.createElement('span');
     ejectBtn.className = 'pin-btn';
-    ejectBtn.title = "Eject from Folder";
-    ejectBtn.innerHTML = ICONS.eject; 
+    ejectBtn.title = "Eject";
+    ejectBtn.innerHTML = ICONS.eject;
     ejectBtn.onclick = (e) => {
         e.stopPropagation();
         delete appState[context].mappings[text];
         saveState();
         nativeRow.classList.remove('plugin-hidden-native');
-        nativeRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        nativeRow.style.transition = 'background 0.5s';
-        nativeRow.style.backgroundColor = '#424242';
-        setTimeout(() => { nativeRow.style.backgroundColor = ''; }, 1000);
         proxy.remove();
     };
     actionsDiv.appendChild(ejectBtn);
 
     const pinBtn = document.createElement('span');
     pinBtn.className = 'pin-btn';
-    pinBtn.title = pinTitle;
+    pinBtn.title = isP ? "Unpin" : "Pin";
     pinBtn.innerHTML = pinIcon;
-    pinBtn.onclick = (e) => { e.stopPropagation(); togglePin(context, text); };
+    pinBtn.onclick = (e) => {
+        e.stopPropagation();
+        togglePin(context, text);
+    };
     actionsDiv.appendChild(pinBtn);
 
     proxy.appendChild(contentDiv);
     proxy.appendChild(actionsDiv);
-
+    
     if (!isPinnedView) injectMoveTrigger(proxy, text, context);
-
+    
     proxy.onclick = (e) => {
-        if (e.target.closest('.plugin-move-trigger') || e.target.closest('.pin-btn')) return;
+        if (e.target.closest('.plugin-move-trigger') || e.target.closest('.pin-btn') || e.target.closest('.plugin-item-check')) return;
+        
         if (context === 'source') {
-            const titleEl = nativeRow.querySelector(activeSelectors.sourceTitle);
-            if(titleEl) {
-                const opts = { bubbles: true, cancelable: true, view: window, buttons: 1 };
-                titleEl.dispatchEvent(new MouseEvent('mousedown', opts));
-                titleEl.dispatchEvent(new MouseEvent('mouseup', opts));
-                titleEl.click();
-            } else nativeRow.click();
+            const titleEl = safeQuery(nativeRow, activeSelectors.sourceTitle);
+            if (titleEl) safeClick(titleEl);
+            else safeClick(nativeRow);
         } else {
-            const titleEl = nativeRow.querySelector(activeSelectors.studioTitle);
-            if(titleEl) titleEl.click(); else nativeRow.click();
+            const titleEl = safeQuery(nativeRow, activeSelectors.studioTitle);
+            if (titleEl) safeClick(titleEl);
+            else safeClick(nativeRow);
         }
     };
-
+    
     return proxy;
 }
 
 function injectMoveTrigger(row, text, context) {
-    if (row.querySelector('.plugin-move-trigger[title="Move to Folder"]')) return;
-    const btn = document.createElement('div');
-    btn.className = 'plugin-move-trigger';
-    btn.innerHTML = ICONS.move;
-    btn.title = "Move to Folder";
-    btn.onclick = (e) => { e.stopPropagation(); e.preventDefault(); showMoveMenu(e, text, context); };
-    
-    if (row.classList.contains('plugin-proxy-item')) {
-        const actions = row.querySelector('.proxy-actions');
-        if (actions) actions.insertBefore(btn, actions.firstChild);
-    } else {
-        if (context === 'source') {
-            const moreBtn = row.querySelector('button[aria-label="More"]');
-            if (moreBtn && moreBtn.parentElement) {
-                moreBtn.parentElement.insertBefore(btn, moreBtn);
-                moreBtn.parentElement.style.display = 'flex';
-            } else row.insertBefore(btn, row.firstChild);
+    try {
+        const btn = document.createElement('span');
+        btn.className = 'plugin-move-trigger';
+        btn.title = "Move to Folder";
+        btn.innerHTML = ICONS.move;
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            showMoveMenu(e, text, context);
+        };
+        if (row.classList.contains('plugin-proxy-item')) {
+            const actions = row.querySelector('.proxy-actions');
+            if (actions) actions.insertBefore(btn, actions.firstChild);
         } else {
-            const actions = row.querySelector('.artifact-item-button');
-            if (actions) {
-                actions.insertBefore(btn, actions.firstChild);
-                actions.style.display = 'flex';
-            } else row.appendChild(btn);
+            if (context === 'source') {
+                const moreBtn = row.querySelector('button[aria-label="More"]');
+                if (moreBtn && moreBtn.parentElement) {
+                    moreBtn.parentElement.insertBefore(btn, moreBtn);
+                    moreBtn.parentElement.style.display = 'flex';
+                } else {
+                    row.insertBefore(btn, row.firstChild);
+                }
+            } else {
+                const actions = row.querySelector('.artifact-item-button');
+                if (actions) {
+                    actions.insertBefore(btn, actions.firstChild);
+                    actions.style.display = 'flex';
+                } else {
+                    row.appendChild(btn);
+                }
+            }
         }
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Inject move trigger error:', e.message);
     }
 }
 
 function showMoveMenu(e, text, context) {
-    document.querySelectorAll('.plugin-dropdown').forEach(el => el.remove());
-    const menu = document.createElement('div');
-    menu.className = 'plugin-dropdown';
-    if (appState[context].mappings[text]) {
-        const item = document.createElement('div');
-        item.className = 'plugin-dropdown-item';
-        item.style.color = '#f28b82';
-        item.innerText = "Remove from Folder";
-        item.onclick = (ev) => {
-            ev.stopPropagation();
-            delete appState[context].mappings[text];
-            saveState();
-            const proxy = document.querySelector(`.plugin-proxy-item[data-ref="${text}"]`);
-            if(proxy) proxy.remove();
-            processItems(context);
-            menu.remove();
-        };
-        menu.appendChild(item);
+    try {
+        document.querySelectorAll('.plugin-dropdown').forEach(el => el.remove());
+        const menu = document.createElement('div');
+        menu.className = 'plugin-dropdown';
+        
+        if (appState[context].mappings[text]) {
+            const item = document.createElement('div');
+            item.className = 'plugin-dropdown-item';
+            item.style.color = '#f28b82';
+            item.innerText = "Remove from Folder";
+            item.onclick = (ev) => {
+                ev.stopPropagation();
+                delete appState[context].mappings[text];
+                saveState();
+                const safeText = CSS.escape(text);
+                const proxy = document.querySelector(`.plugin-proxy-item[data-ref="${safeText}"]`);
+                if (proxy) proxy.remove();
+                safeProcessItems(context);
+                menu.remove();
+            };
+            menu.appendChild(item);
+        }
+        
+        const list = getFlatList(context);
+        if (list.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'plugin-dropdown-item';
+            empty.style.fontStyle = 'italic';
+            empty.innerText = "No folders created";
+            menu.appendChild(empty);
+        }
+        list.forEach(f => {
+            const item = document.createElement('div');
+            item.className = 'plugin-dropdown-item';
+            let indent = "";
+            for (let i = 0; i < f.level; i++) indent += "\u00A0\u00A0";
+            item.innerHTML = `${indent}${ICONS.folder} ${f.name}`;
+            item.onclick = (ev) => {
+                ev.stopPropagation();
+                appState[context].mappings[text] = f.id;
+                appState[context].folders[f.id].isOpen = true;
+                saveState();
+                renderTree(context);
+                setTimeout(() => safeProcessItems(context), DOM_SETTLE_DELAY_MS);
+                menu.remove();
+            };
+            menu.appendChild(item);
+        });
+        
+        document.body.appendChild(menu);
+        const rect = e.target.getBoundingClientRect();
+        menu.style.top = (rect.bottom + window.scrollY) + 'px';
+        menu.style.left = rect.left + 'px';
+        
+        setTimeout(() => {
+            const close = () => {
+                menu.remove();
+                document.removeEventListener('click', close);
+            };
+            document.addEventListener('click', close);
+        }, DOM_SETTLE_DELAY_MS);
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Show move menu error:', e.message);
     }
-    const list = getFlatList(context);
-    if (list.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'plugin-dropdown-item';
-        empty.style.fontStyle = 'italic';
-        empty.innerText = "No folders created";
-        menu.appendChild(empty);
-    }
-    list.forEach(f => {
-        const item = document.createElement('div');
-        item.className = 'plugin-dropdown-item';
-        let indent = ""; for(let i=0; i<f.level; i++) indent += "&nbsp;&nbsp;";
-        item.innerHTML = `${indent}${ICONS.folder} ${f.name}`;
-        item.onclick = (ev) => {
-            ev.stopPropagation();
-            appState[context].mappings[text] = f.id;
-            appState[context].folders[f.id].isOpen = true;
-            saveState();
-            renderTree(context);
-            setTimeout(() => processItems(context), 50);
-            menu.remove();
-        };
-        menu.appendChild(item);
-    });
-    document.body.appendChild(menu);
-    const rect = e.target.getBoundingClientRect();
-    menu.style.top = (rect.bottom + window.scrollY) + 'px';
-    menu.style.left = rect.left + 'px';
-    setTimeout(() => {
-        const close = () => { menu.remove(); document.removeEventListener('click', close); };
-        document.addEventListener('click', close);
-    }, 100);
 }
 
 function createFolder(context, parentId) {
     const name = prompt("Folder Name:");
-    if(!name) return;
-    const id = Math.random().toString(36).substr(2,9);
-    const count = Object.values(appState[context].folders).filter(f => f.parentId === parentId).length;
+    if (!name) return;
+    const id = Math.random().toString(36).substr(2, 9);
+    const count = Object.values(appState[context].folders || {}).filter(f => f.parentId === parentId).length;
     appState[context].folders[id] = { id, name, parentId, isOpen: true, order: count };
     saveState();
     renderTree(context);
 }
 
 function deleteFolder(context, id) {
-    delete appState[context].folders[id];
-    const maps = appState[context].mappings;
-    Object.keys(maps).forEach(k => { if(maps[k]===id) delete maps[k]; });
-    Object.values(appState[context].folders).forEach(f => { if(f.parentId===id) f.parentId=null; });
-    saveState();
-    renderTree(context);
-    processItems(context); 
+    try {
+        delete appState[context].folders[id];
+        const maps = appState[context].mappings || {};
+        Object.keys(maps).forEach(k => {
+            if (maps[k] === id) delete maps[k];
+        });
+        Object.values(appState[context].folders || {}).forEach(f => {
+            if (f.parentId === id) f.parentId = null;
+        });
+        saveState();
+        renderTree(context);
+        safeProcessItems(context);
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Delete folder error:', e.message);
+    }
 }
 
 function getFlatList(context) {
     const arr = [];
-    const folders = appState[context].folders;
+    const folders = appState[context].folders || {};
     function recurse(pid, level) {
-        const kids = Object.values(folders).filter(f => {
-            const parent = f.parentId || null;
-            const target = pid || null;
-            return parent === target;
-        }).sort((a,b)=> {
-             const orderA = a.order !== undefined ? a.order : 0;
-             const orderB = b.order !== undefined ? b.order : 0;
-             if (orderA !== orderB) return orderA - orderB;
-             return a.name.localeCompare(b.name);
-        });
+        const kids = Object.values(folders).filter(f => (f.parentId || null) === (pid || null)).sort((a, b) => (a.order || 0) - (b.order || 0));
         kids.forEach(k => {
             arr.push({ id: k.id, name: k.name, level });
-            recurse(k.id, level+1);
+            recurse(k.id, level + 1);
         });
     }
     recurse(null, 0);
     return arr;
 }
 
-// --- ADVANCED SEARCH (FUZZY + DEEP INDEX) ---
-function filterProxies(context, query) {
-    const term = query.toLowerCase().trim();
-    const container = document.getElementById(`plugin-${context}-root`);
-    if (!container) return;
-
-    const getFolderNode = (id) => container.querySelector(`#node-${id}`);
-    
-    if (!term) {
-        container.querySelectorAll('.plugin-proxy-item').forEach(el => el.style.display = 'flex');
-        container.querySelectorAll('.plugin-tree-node').forEach(el => el.style.display = 'block');
-        Object.values(appState[context].folders).forEach(f => {
-            const node = getFolderNode(f.id);
-            if(node) {
-                if (f.isOpen) node.classList.add('open');
-                else node.classList.remove('open');
-            }
-        });
-        return;
-    }
-
-    container.querySelectorAll('.plugin-proxy-item').forEach(el => el.style.display = 'none');
-    container.querySelectorAll('.plugin-tree-node').forEach(el => el.style.display = 'none');
-
-    const proxies = container.querySelectorAll('.plugin-proxy-item');
-    proxies.forEach(proxy => {
-        const visibleText = proxy.dataset.searchTerm || proxy.innerText.toLowerCase();
-        const titleRaw = proxy.dataset.ref || "";
-        const titleKey = normalizeKey(titleRaw);
-        const deepContent = searchIndex[titleKey] || "";
-
-        const combinedText = visibleText + " " + deepContent;
-
-        const terms = term.split(' ').filter(t => t);
-        const isMatch = terms.every(t => combinedText.includes(t));
-
-        if (isMatch) {
-            proxy.style.display = 'flex';
-            
-            let parent = proxy.parentElement;
-            while(parent && parent !== container) {
-                if(parent.classList.contains('plugin-node-children')) {
-                    const folderNode = parent.parentElement;
-                    if(folderNode) {
-                        folderNode.style.display = 'block';
-                        folderNode.classList.add('open');
-                    }
-                }
-                parent = parent.parentElement;
-            }
-        }
-    });
-
-    const folderNodes = container.querySelectorAll('.plugin-tree-node');
-    folderNodes.forEach(node => {
-        const header = node.querySelector('.plugin-folder-header .folder-name');
-        if(!header) return;
-        
-        const folderName = header.innerText.toLowerCase();
-        if (folderName.includes(term)) {
-            node.style.display = 'block';
-            let parent = node.parentElement;
-            while(parent && parent !== container) {
-                if (parent.classList.contains('plugin-node-children')) {
-                    const grandParent = parent.parentElement;
-                    if(grandParent) {
-                        grandParent.style.display = 'block';
-                        grandParent.classList.add('open');
-                    }
-                }
-                parent = parent.parentElement;
-            }
-        }
-    });
-}
-
+// --- START ---
 init();
