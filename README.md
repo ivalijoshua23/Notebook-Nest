@@ -143,7 +143,6 @@ See [PRIVACY_POLICY.md](PRIVACY_POLICY.md) for details.
 
 ## Known Limitations
 
-- **Studio Notes:** Non-markdown (`.md`) notes (e.g., "Saved Responses") in the Studio panel cannot currently be moved to folders.
 - **Underlining:** Underlining content in a note is not persistent (this is a Google NotebookLM issue, not the extension).
 - **Incognito:** The extension's memory system is disabled in Incognito mode.
 
@@ -163,3 +162,4 @@ This program is free software: you can redistribute it and/or modify it under th
 
 
 *Note: This ensures that any improvements made to this project must be shared back with the community.*
+
