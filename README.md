@@ -40,13 +40,13 @@ We have moved to a **Local-First Architecture**.
     - **Master Select:** One click to select/deselect *all* sources in the notebook.
     - **Folder Toggles:** Hover over any folder to instantly check/uncheck all documents inside it.
     - **Smart Sync:** The tree watches the real app state in real-time.
-- **"Zen Mode"** — Toggle the UI to hide the AI chat and sidebars for a distraction-free reading/writing studio.
+- **"Zen Mode"** — Toggle the UI to hide the AI chat for a distraction-free reading/writing studio.
 
 ### 📂 Organization
 - **Nested Folders** — Create deep structures for both Sources and Studio Notes.
 - **Pinning** — Keep critical contracts or specs pinned to the top.
 - **Color Coding** — Assign colors to folders for visual organization.
-- **Drag & Drop** — Easily move items between folders.
+
 
 ### 🔍 Deep Search
 - **Content Indexing** — Search the *actual text* inside your notes, not just the titles.
@@ -96,15 +96,13 @@ Because v17.5 prioritizes speed and unlimited capacity, **your data lives on you
 
 **Source Dashboard**
 *The new Task List, Folder Tree, and Bulk Select Checkboxes.*
-<img width="252" height="170" alt="Source Dashboard with Tasks" src="https://github.com/user-attachments/assets/d3b36a39-abf6-4b6c-a81d-2688fbca07e4" />
 
 **Folder Controls**
 *Manage colors, renaming, and nested structures.*
-<img width="432" height="129" alt="Folder Controls" src="https://github.com/user-attachments/assets/b6c79d4b-90f3-42b2-a3ff-d267413aca4f" />
 
 **Zen Mode & Focus**
 *Clean interface with chat hidden.*
-<img width="471" height="121" alt="Zen Mode" src="https://github.com/user-attachments/assets/26ca3554-402c-4b2b-9635-0fda91cd5a22" />
+
 
 ## Privacy & Security
 
@@ -134,5 +132,6 @@ Found a bug or have a feature request? Open an issue or submit a PR.
 **GPLv3 License**
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
 
 *Note: This ensures that any improvements made to this project must be shared back with the community.*
