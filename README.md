@@ -1,165 +1,141 @@
-# NotebookLM Pro Tree
+NotebookLM Pro Tree
+A Chrome extension that transforms Google's NotebookLM from a simple list into a robust Project Management Dashboard.
 
-A Chrome extension that transforms Google's NotebookLM from a simple list into a robust **Project Management Dashboard**.
+Stop scrolling through endless flat lists. Organize your sources into nested trees, manage complex projects with advanced tasks, multi-window workflows, and focus with Zen Mode.
 
-Stop scrolling through endless flat lists. Organize your sources into nested trees, manage project tasks, select documents in bulk, and focus with Zen Mode.
+⚠️ Critical Warnings
+Uninstalling Deletes Data: This extension uses Local Storage for privacy and speed. If you remove/uninstall the extension, your folders and tasks will be deleted instantly by Chrome.
 
----
+Solution: Always use the Export button to save a backup JSON file before reinstalling or moving to a new computer.
 
-## ⚠️ Critical Warnings
+Google Updates & Reliability: This extension works by "reading" the NotebookLM website. If Google updates their website, this extension may break.
 
-1.  **Uninstalling Deletes Data:** Because this extension uses **Local Storage** for privacy and speed, **if you remove/uninstall the extension, your folders and tasks will be deleted instantly by Chrome.**
-    * **Solution:** Always use the **Export** button to save a backup JSON file before reinstalling or moving to a new computer.
+Disclaimer: As this is a free, open-source project maintained in my spare time, I cannot guarantee immediate fixes if Google changes their code. Use this tool as a helpful enhancement, but keep your important data backed up.
 
-2.  **Google Updates & Reliability:** This extension works by "reading" the NotebookLM website. **If Google updates their website, this extension may break.**
-    * **Disclaimer:** As this is a free, open-source project maintained in my spare time, I cannot guarantee immediate fixes if Google changes their code. Use this tool as a helpful enhancement, but keep your important data backed up.
+🚧 Project Status & Disclaimer
+Please Read: I am a Construction Project Manager, not a professional software developer. I built this tool because I needed it for my own daily workflow.
 
----
+"Works on My Machine": This update (v17.9) is stable for my personal use, but it has not been battle-tested on every possible browser configuration.
 
-## 🚧 Project Status & Disclaimer
+Experimental Features: The multi-window system and DOM observers are complex. You may encounter bugs I haven't seen.
 
-**Please Read:** I am a Construction Project Manager, not a professional software developer. I built this tool because I needed it for my own daily workflow.
+Feedback: If you find a bug, please open an issue on GitHub!
 
-* **"Works on My Machine":** This update (v17.5) is stable for my personal use, but it has **not been battle-tested** on every possible browser configuration or operating system.
-* **Experimental Features:** The new storage engine and task manager are powerful but complex. You may encounter bugs I haven't seen.
-* **Feedback:** If you find a bug, please open an issue on GitHub!
+🚀 New in v17.9: The Productivity Suite
+Transformed NotebookLM into a multi-window workspace. This update (consolidating v17.6–v17.9) brings major workflow improvements:
 
----
+Pop-out Notes: Open any note in a floating window for side-by-side reference while you write. The pop-outs preserve formatting (read-only) and sync with your Light/Dark theme.
 
-## 🚀 New in v17.5: The Storage Overhaul
-We have moved to a **Local-First Architecture**.
-- **Unlimited Storage:** You can now build massive folder trees without hitting Chrome's tiny sync limits. Note this only applies to extension related items and note notes/sources/generated items
-- **Instant Performance:** Saves happen instantly with no network latency.
-- **Bigger Brain:** Deep Search index is now **5MB** (up from 2MB), allowing you to index 2x more note content.
-- **Source List Item Selection:** Source list item selection and control.
-- **Zen/Focus Mode:** Hide the center AI chat Area.
-- **Move generated Items to folders:** Store generated items in custom tree view folders.
-- **Task Manager:** Added Task List to Source panel with priority, sorting by priority, due date.
+Smart Tasks & Quick Capture: Select text in any note to instantly see a "Create Task" button. This creates a task linked directly to that source note.
 
-## Features
+Advanced Task Management: Organize tasks into Custom Sections (collapsible groups), add Due Dates with quick-select options, and include rich Descriptions.
 
-### 📋 Productivity & Workflow
-- **Integrated Task Manager** — Built-in to-do list for every notebook. Prioritize (Red/Yellow/Blue), sort instantly, and track completions.
-- **Advanced Source Control** — The "Command Center" for your sources:
-    - **Master Select:** One click to select/deselect *all* sources in the notebook.
-    - **Folder Toggles:** Hover over any folder to instantly check/uncheck all documents inside it.
-    - **Smart Sync:** The tree watches the real app state in real-time.
-- **"Zen Mode"** — Toggle the UI to hide the AI chat and sidebars for a distraction-free reading/writing studio.
+Graceful Stability: A new self-healing engine that disables specific broken features individually instead of crashing the whole extension if Google updates their code.
 
-### 📂 Organization
-- **Nested Folders** — Create deep structures for both Sources and Studio Notes.
-- **Pinning** — Keep critical contracts or specs pinned to the top.
-- **Color Coding** — Assign colors to folders for visual organization.
--**Generated Artifacts** - Move generatd artifacts to custom folders
+Features
+📋 Productivity & Workflow
+Multi-Window Workflow — Click the "Pop-out" icon on any note in the Studio panel to open it in a separate window. Perfect for dual-monitor setups.
 
-### 🔍 Deep Search
-- **Content Indexing** — Search the *actual text* inside your notes, not just the titles.
-- **Smart Compression** — Uses LZ-String compression to store significantly more data locally.
+Integrated Task Manager — A complete project management tool built right into the interface:
 
-### 🛡️ Reliability
-- **Self-Healing UI** — Automatically detects if Google refreshes the page layout and repairs the folder tree instantly.
-- **Robust Selectors** — Uses multiple backup methods to find UI elements if Google updates their code.
-- **Styled Dialogs** — Smooth, themed confirmation dialogs (no more jarring browser popups).
+Sections: Group tasks by phase (e.g., "Research," "Drafting," "Review").
 
-> **Note:** Each notebook has its own independent data. Tasks and Folders created in "Project A" won't clutter "Project B."
+Smart Links: Tasks created from notes include a "Link" icon that filters your view to the original source.
 
-## Installation
+Priorities: Flag tasks (Red/Yellow/Blue) and sort by Priority or Due Date.
 
-### Load Unpacked (Developer Mode)
+"Zen Mode" — Toggle the UI to hide the AI chat and sidebars for a distraction-free reading/writing studio.
 
-1. Download or clone this repository.
-2. Open Chrome and go to `chrome://extensions`.
-3. Enable **Developer mode** (toggle in top right).
-4. Click **Load unpacked**.
-5. Select the folder containing these extension files.
-6. Navigate to [NotebookLM](https://notebooklm.google.com) and start organizing!
+📂 Organization
+Nested Folders — Create deep structures for Sources, Notes, and Generated Artifacts (Audio Overviews, FAQs, etc.).
 
-## Usage
+Pinning — Keep critical contracts or specs pinned to the top of your lists.
 
-Once installed, you'll see a new "Project Dashboard" interface:
+Color Coding — Assign colors to folders for visual organization.
 
-- **Tasks** — Type in the input box to add tasks. Click the checkmark to complete, or the color block to change priority.
-- **Bulk Select** — Click the checkbox next to any Folder to select/deselect all sources inside it.
-- **Zen Mode** — Click the "Target/Focus" icon in the toolbar to toggle the UI.
-- **Move Items** — Hover over any source or note and click the arrow icon to move it.
-- **Deep Search** — Click on notes to index them. Use the search bar to find content.
-- **Export/Import** — Use these buttons to backup your structure or move it to a new computer.
+Bulk Select — Master checkboxes to select/deselect all sources in a folder or the entire notebook instantly.
 
-## 💾 Storage & Data Guide
+🔍 Deep Search
+Content Indexing — Search the actual text inside your notes, not just the titles.
 
-**Where Your Data Lives:**
-Because v17.5 prioritizes speed and unlimited capacity (not related to notes or sources), **your data lives on your device.**
+Note: Indexing happens passively when you open a note.
 
-* **Local Storage:** Folders, Tasks, Settings, and Search Index.
-* **No Auto-Sync:** Folders do **not** sync automatically between computers.
-* **Moving Data:** To move your setup to a laptop, use the **Export** button to get a JSON file, then **Import** on the new machine.
+Smart Compression — Uses LZ-String compression to store up to 5MB of search index data locally without impacting performance.
 
-**Warning:** If you clear Chrome's "Site Data" or "Cookies," you will lose your folders. **Export backups regularly.**
+🛡️ Reliability
+Local-First Architecture — Zero network latency. All data lives on your device.
 
-## Screenshots
+Graceful Degradation — If a feature fails due to a website update, the rest of the extension keeps working.
 
-**Source Dashboard:**
-*The new Task List, Folder Tree, and Bulk Select Checkboxes.*
+Styled Dialogs — Smooth, themed confirmation dialogs (no more jarring browser popups).
 
-<img width="460" height="734" alt="image" src="https://github.com/user-attachments/assets/30ce080c-42b4-4571-968d-4527bf1a49f8" />
+Note: Each notebook has its own independent data. Tasks and Folders created in "Project A" won't clutter "Project B."
 
+Installation
+Load Unpacked (Developer Mode)
+Download or clone this repository.
 
-**Folder Controls:**
-*Manage colors, renaming, and nested structures.*
+Open Chrome and go to chrome://extensions.
 
-<img width="462" height="505" alt="image" src="https://github.com/user-attachments/assets/44c339ca-402f-41d7-81f0-4425435e042b" />
+Enable Developer mode (toggle in top right).
 
-**Zen/Focus Mode:**
-*Clean interface with chat hidden.*
+Click Load unpacked.
 
-<img width="1822" height="621" alt="image" src="https://github.com/user-attachments/assets/27ed86d6-3993-4094-86ac-d44fa9a1c434" />
+Select the folder containing these extension files.
 
-**Source List Item Control:**
-*Bulk and granular control over source items.*
+Navigate to NotebookLM and start organizing!
 
-<img width="350" height="359" alt="image" src="https://github.com/user-attachments/assets/f559ca46-89aa-4dae-9103-e6a42ad7b2a9" />
+Usage
+Once installed, you'll see a new "Project Dashboard" interface injected into NotebookLM:
 
+Quick Capture: Highlight text in any note -> click the floating + button to turn it into a task.
 
-**Improved search index:**
-*Count of item's indexed. Note you must open a note to index it.*
+Pop-out: Hover over a note in the Studio panel -> click the New Window icon.
 
-<img width="465" height="125" alt="image" src="https://github.com/user-attachments/assets/6e199a79-40bb-4555-ba45-e9789192f8de" />
+Task Details: Click the Description icon on a task to add notes or context.
 
-**Generated Items Moved to Folders:**
-*Generated items can now be moved to folders.*
+Bulk Actions: Use the folder checkboxes to toggle multiple sources for the AI context window.
 
-<img width="418" height="367" alt="image" src="https://github.com/user-attachments/assets/ede649db-4af0-460c-9b5c-af0bd6355bc2" />
+Export/Import: Use these buttons to backup your structure or move it to a new computer.
 
+💾 Storage & Data Guide
+Where Your Data Lives: Because v17.9 prioritizes speed and privacy, your data lives on your device.
 
+Local Storage: Folders, Tasks, Settings, and Search Index.
 
-## Privacy & Security
+No Auto-Sync: Folders do not sync automatically between computers.
 
-This extension is **Local-First**:
-- All data is stored in your browser's local storage.
-- No analytics or usage data is sent to the developer.
-- Open Source: You can inspect the code to verify no data leaves your machine.
+Moving Data: To move your setup to a laptop, use the Export button to get a JSON file, then Import on the new machine.
 
-See [PRIVACY_POLICY.md](PRIVACY_POLICY.md) for details.
+Warning: If you clear Chrome's "Site Data" or "Cookies," you will lose your folders. Export backups regularly.
 
-## Known Limitations
+Privacy & Security
+This extension is Local-First:
 
-- **Underlining:** Underlining content in a note is not persistent (this is a Google NotebookLM issue, not the extension).
-- **Incognito:** The extension's memory system is disabled in Incognito mode.
+All data is stored in your browser's local storage.
 
-## Contributing
+No analytics or usage data is sent to the developer.
 
+Open Source: You can inspect the code to verify no data leaves your machine.
+
+See PRIVACY_POLICY.md for details.
+
+Known Limitations
+Pop-out Editing: Pop-out windows are currently Read-Only. You must use the main window to edit text.
+
+Underlining: Underlining content in a note is not persistent (this is a Google NotebookLM issue, not the extension).
+
+Incognito: The extension's memory system is disabled in Incognito mode.
+
+Contributing
 Found a bug or have a feature request? Open an issue or submit a PR.
 
-## Author
+Author
+Benju66
 
-**Benju66**
-
-## License
-
-**GPLv3 License**
+License
+GPLv3 License
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 
-
-*Note: This ensures that any improvements made to this project must be shared back with the community.*
-
+Note: This ensures that any improvements made to this project must be shared back with the community.

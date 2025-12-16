@@ -1,22 +1,66 @@
 /**
- * NotebookLM Pro Tree - V17.6 (Generated Items Support)
+ * NotebookLM Pro Tree - V17.9 (Note Pop-out)
  * Author: Benju66
  * NOTE: Version is now read from manifest.json only - single source of truth
  * 
- * V17.5 Changes:
+ * V17.9 Changes:
+ * - Added note pop-out feature to open notes in separate browser windows
+ * - Pop-out button appears on hover for folder items and active notes
+ * - Read-only view with full formatting preservation (when opened from active note)
+ * - Plain text fallback for indexed notes (when opened from folder)
+ * - Copy to clipboard functionality in pop-out windows
+ * - Dark/light theme support matching NotebookLM
+ * - Namespace bridge for modular architecture (window.NotebookLMTree)
+ * 
+ * V17.8 Changes:
+ * - Added graceful degradation system for feature resilience
+ * - Features disable individually after repeated failures instead of crashing
+ * - Updated remote config URL to use versionless Gist endpoint
+ * - Improved error recovery and user feedback
+ * 
+ * V17.7 Changes:
+ * - Added task description field (optional context for tasks)
+ * - Description icon in task toolbar (blue when has description)
+ * - Hover over description icon shows preview tooltip
+ * - Click description icon to view/edit in dedicated modal
+ * - Floating "Create Task" button appears when selecting text in notes
+ * - Auto-populates task title (truncated), description (full text), and source note
+ * - Source note name captured and displayed (read-only reference)
+ * - Link icon in task toolbar for tasks created from notes (blue, always visible)
+ * - Click link icon to filter Studio panel to show the source note
+ * - Edit modal now includes description field
+ * - Create modal now includes description field
+ * 
+ * V17.6 Changes:
  * - Added support for generated items (Slides, Infographics, FAQs, etc.) in Studio panel
  * - Generated items can now be moved to folders like notes
  * - Items still being generated are automatically skipped until complete
+ * - Added custom task sections (collapsible groups for organizing tasks)
+ * - Task sections support colors, reordering, rename, and delete
+ * - Tasks can be moved between sections via move button
+ * - Added date picker for task due dates (replaces manual text input)
+ * - Added "Today", "Tomorrow", "+1 Week" quick date buttons
+ * - Added expandable options panel when creating tasks (date + section)
+ * - Added "Sort by Due Date" button in task header
+ * - Enhanced task edit modal with date picker and section selector
+ * - Updated Zen Mode icon to "Self Improvement" (meditation pose)
+ * - Fixed folder checkbox only showing in Source panel (not Studio)
+ * 
+ * V17.5 Changes:
  * - Switched to local-only storage (unlimitedStorage permission)
  * - Automatic migration from sync storage for existing users
  * - Removed 100KB sync storage limitation
  * - Simplified storage architecture for future features (links/tags)
  * - Cleaner codebase with single storage path
+ * 
+ * V17.4 Changes:
  * - Version now reads from manifest.json (no more manual sync needed)
  * - Added custom styled confirmation modals (replaces native confirm())
  * - Added search index size limit (2MB) with LRU eviction
  * - Added race condition guard for processItems()
  * - Improved memory management for large notebooks
+ * 
+ * V17.3 Changes:
  * - Added "Select All/Deselect All" button to source panel
  * - Added checkboxes to individual tree items (synced with native state)
  * - Added bulk-select checkboxes to folders
@@ -24,7 +68,7 @@
  */
 
 // --- CONFIGURATION ---
-const REMOTE_CONFIG_URL = "https://gist.githubusercontent.com/benju66/7635f09ea87f81c890f9b736b22d9ac4/raw/09232a0ceb72a14b456bcd239b4e35b7f19c033f/notebooklm-selectors.json";
+const REMOTE_CONFIG_URL = "https://gist.githubusercontent.com/benju66/7635f09ea87f81c890f9b736b22d9ac4/raw/notebooklm-selectors.json";
 
 // --- VERSION HELPER (Single source of truth: manifest.json) ---
 function getExtensionVersion() {
@@ -52,6 +96,7 @@ const TOAST_FADE_MS = 300;
 const CONFIG_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const HEALTH_CHECK_INTERVAL_MS = 30000; // Check selector health every 30s
 const SELECTOR_FAILURE_THRESHOLD = 3; // Warn after this many selector types fail
+const MAX_FEATURE_FAILURES = 3; // Disable feature after this many consecutive failures
 
 // --- DEFAULT SELECTORS (Arrays for fallback chain) ---
 const DEFAULT_SELECTORS = {
@@ -124,7 +169,7 @@ let activeSelectors = JSON.parse(JSON.stringify(DEFAULT_SELECTORS));
 
 // --- STATE ---
 const DEFAULT_STATE = {
-    source: { folders: {}, mappings: {}, pinned: [], tasks: [] },
+    source: { folders: {}, mappings: {}, pinned: [], tasks: [], taskSections: {} },
     studio: { folders: {}, mappings: {}, pinned: [] },
     settings: { showGenerators: true, showResearch: true, focusMode: false, tasksOpen: true, completedOpen: false }
 };
@@ -138,6 +183,101 @@ let mainObserver = null;
 let healthCheckInterval = null;
 let lastHealthStatus = null;
 let isProcessingItems = false; // Race condition guard for processItems
+
+// --- GRACEFUL DEGRADATION SYSTEM ---
+const featureStatus = {
+    folderOrganization: { enabled: true, failures: 0, notified: false },
+    taskManagement: { enabled: true, failures: 0, notified: false },
+    searchIndexing: { enabled: true, failures: 0, notified: false },
+    pinning: { enabled: true, failures: 0, notified: false },
+    treeRendering: { enabled: true, failures: 0, notified: false }
+};
+
+/**
+ * Wraps a feature function with graceful degradation.
+ * If a feature fails repeatedly, it gets disabled instead of crashing the extension.
+ * @param {string} featureName - Key in featureStatus object
+ * @param {Function} fn - Function to execute
+ * @param {boolean} silent - If true, don't show toast on disable
+ * @returns {*} Return value of fn, or undefined if feature is disabled/failed
+ */
+function runWithGracefulDegradation(featureName, fn, silent = false) {
+    const status = featureStatus[featureName];
+    if (!status) {
+        // Unknown feature, just run it
+        try { return fn(); } catch (e) { console.debug('[NotebookLM Tree] Unknown feature error:', e.message); }
+        return;
+    }
+    
+    if (!status.enabled) {
+        return; // Feature is disabled, skip silently
+    }
+    
+    try {
+        const result = fn();
+        // Reset failures on success
+        if (status.failures > 0) {
+            status.failures = 0;
+        }
+        return result;
+    } catch (e) {
+        status.failures++;
+        console.warn(`[NotebookLM Tree] ${featureName} error (${status.failures}/${MAX_FEATURE_FAILURES}):`, e.message);
+        
+        if (status.failures >= MAX_FEATURE_FAILURES) {
+            status.enabled = false;
+            console.error(`[NotebookLM Tree] ${featureName} disabled due to repeated failures`);
+            
+            if (!silent && !status.notified) {
+                status.notified = true;
+                setTimeout(() => {
+                    showToast(`${formatFeatureName(featureName)} temporarily unavailable`);
+                }, 100);
+            }
+        }
+    }
+}
+
+/**
+ * Formats feature name for user display
+ */
+function formatFeatureName(featureName) {
+    const names = {
+        folderOrganization: 'Folder organization',
+        taskManagement: 'Task management',
+        searchIndexing: 'Search indexing',
+        pinning: 'Pinning',
+        treeRendering: 'Tree view'
+    };
+    return names[featureName] || featureName;
+}
+
+/**
+ * Checks if a feature is currently enabled
+ */
+function isFeatureEnabled(featureName) {
+    const status = featureStatus[featureName];
+    return status ? status.enabled : true;
+}
+
+/**
+ * Manually reset a feature to try again
+ */
+function resetFeature(featureName) {
+    const status = featureStatus[featureName];
+    if (status) {
+        status.enabled = true;
+        status.failures = 0;
+        status.notified = false;
+    }
+}
+
+/**
+ * Reset all features
+ */
+function resetAllFeatures() {
+    Object.keys(featureStatus).forEach(resetFeature);
+}
 
 // --- UTILITY: DEBOUNCE ---
 function debounce(fn, delay) {
@@ -206,6 +346,301 @@ function showConfirmModal(message, onConfirm, onCancel) {
     
     document.body.appendChild(overlay);
     overlay.querySelector('.plugin-modal-btn.confirm').focus();
+}
+
+function showTaskEditModal(task, onSave) {
+    const existing = document.getElementById('plugin-confirm-modal');
+    if (existing) existing.remove();
+    
+    const sections = appState.source.taskSections || {};
+    const sortedSections = Object.values(sections).sort((a, b) => (a.order || 0) - (b.order || 0));
+    let sectionOptionsHtml = '<option value="">No Section</option>';
+    sortedSections.forEach(s => {
+        const selected = task.sectionId === s.id ? 'selected' : '';
+        sectionOptionsHtml += `<option value="${s.id}" ${selected}>${s.name}</option>`;
+    });
+    
+    const sourceHtml = task.sourceNote 
+        ? `<div class="plugin-edit-field">
+               <label>Source</label>
+               <input type="text" class="edit-task-source" value="${task.sourceNote}" readonly />
+           </div>`
+        : '';
+    
+    const overlay = document.createElement('div');
+    overlay.id = 'plugin-confirm-modal';
+    overlay.className = 'plugin-modal-overlay';
+    overlay.innerHTML = `
+        <div class="plugin-modal-content plugin-edit-modal">
+            <div class="plugin-modal-title">Edit Task</div>
+            <div class="plugin-edit-field">
+                <label>Task</label>
+                <input type="text" class="edit-task-text" value="${task.text.replace(/"/g, '&quot;')}" />
+            </div>
+            <div class="plugin-edit-field">
+                <label>Description <span class="optional-label">(optional)</span></label>
+                <textarea class="edit-task-description" placeholder="Add details..." rows="3">${task.description || ''}</textarea>
+            </div>
+            ${sourceHtml}
+            <div class="plugin-edit-field">
+                <label>Due Date</label>
+                <div class="plugin-edit-date-row">
+                    <input type="date" class="edit-task-date" value="${task.date || ''}" />
+                    <button class="quick-date-btn" data-days="0">Today</button>
+                    <button class="quick-date-btn" data-days="1">Tomorrow</button>
+                    <button class="quick-date-btn clear-date">Clear</button>
+                </div>
+            </div>
+            <div class="plugin-edit-field">
+                <label>Section</label>
+                <select class="edit-task-section">${sectionOptionsHtml}</select>
+            </div>
+            <div class="plugin-modal-buttons">
+                <button class="plugin-modal-btn cancel">Cancel</button>
+                <button class="plugin-modal-btn confirm">Save</button>
+            </div>
+        </div>
+    `;
+    
+    const closeModal = () => overlay.remove();
+    const textInput = overlay.querySelector('.edit-task-text');
+    const descInput = overlay.querySelector('.edit-task-description');
+    const dateInput = overlay.querySelector('.edit-task-date');
+    const sectionSelect = overlay.querySelector('.edit-task-section');
+    
+    // Quick date buttons
+    overlay.querySelectorAll('.quick-date-btn').forEach(btn => {
+        btn.onclick = (e) => {
+            e.preventDefault();
+            if (btn.classList.contains('clear-date')) {
+                dateInput.value = '';
+            } else {
+                const days = parseInt(btn.dataset.days, 10);
+                const date = new Date();
+                date.setDate(date.getDate() + days);
+                dateInput.value = date.toISOString().split('T')[0];
+            }
+        };
+    });
+    
+    overlay.querySelector('.plugin-modal-btn.cancel').onclick = closeModal;
+    
+    overlay.querySelector('.plugin-modal-btn.confirm').onclick = () => {
+        const newText = textInput.value.trim();
+        if (newText) {
+            onSave({
+                text: newText,
+                description: descInput.value.trim(),
+                date: dateInput.value,
+                sectionId: sectionSelect.value || null
+            });
+        }
+        closeModal();
+    };
+    
+    overlay.onclick = (e) => {
+        if (e.target === overlay) closeModal();
+    };
+    
+    const escHandler = (e) => {
+        if (e.key === 'Escape') {
+            closeModal();
+            document.removeEventListener('keydown', escHandler);
+        }
+    };
+    document.addEventListener('keydown', escHandler);
+    
+    document.body.appendChild(overlay);
+    textInput.focus();
+    textInput.select();
+}
+
+function showTaskCreateModal(preSelectedSectionId = null) {
+    const existing = document.getElementById('plugin-confirm-modal');
+    if (existing) existing.remove();
+    
+    const sections = appState.source.taskSections || {};
+    const sortedSections = Object.values(sections).sort((a, b) => (a.order || 0) - (b.order || 0));
+    let sectionOptionsHtml = '<option value="">No Section</option>';
+    sortedSections.forEach(s => {
+        const selected = preSelectedSectionId === s.id ? 'selected' : '';
+        sectionOptionsHtml += `<option value="${s.id}" ${selected}>${s.name}</option>`;
+    });
+    
+    const overlay = document.createElement('div');
+    overlay.id = 'plugin-confirm-modal';
+    overlay.className = 'plugin-modal-overlay';
+    overlay.innerHTML = `
+        <div class="plugin-modal-content plugin-edit-modal">
+            <div class="plugin-modal-title">New Task</div>
+            <div class="plugin-edit-field">
+                <label>Task</label>
+                <input type="text" class="edit-task-text" placeholder="Enter task..." />
+            </div>
+            <div class="plugin-edit-field">
+                <label>Description <span class="optional-label">(optional)</span></label>
+                <textarea class="edit-task-description" placeholder="Add details..." rows="3"></textarea>
+            </div>
+            <div class="plugin-edit-field plugin-source-field" style="display:none;">
+                <label>Source</label>
+                <input type="text" class="edit-task-source" readonly />
+            </div>
+            <div class="plugin-edit-field">
+                <label>Due Date</label>
+                <div class="plugin-edit-date-row">
+                    <input type="date" class="edit-task-date" />
+                    <button class="quick-date-btn" data-days="0">Today</button>
+                    <button class="quick-date-btn" data-days="1">Tomorrow</button>
+                    <button class="quick-date-btn clear-date">Clear</button>
+                </div>
+            </div>
+            <div class="plugin-edit-field">
+                <label>Section</label>
+                <select class="edit-task-section">${sectionOptionsHtml}</select>
+            </div>
+            <div class="plugin-modal-buttons">
+                <button class="plugin-modal-btn cancel">Cancel</button>
+                <button class="plugin-modal-btn confirm">Create</button>
+            </div>
+        </div>
+    `;
+    
+    const closeModal = () => overlay.remove();
+    const textInput = overlay.querySelector('.edit-task-text');
+    const descInput = overlay.querySelector('.edit-task-description');
+    const sourceInput = overlay.querySelector('.edit-task-source');
+    const sourceField = overlay.querySelector('.plugin-source-field');
+    const dateInput = overlay.querySelector('.edit-task-date');
+    const sectionSelect = overlay.querySelector('.edit-task-section');
+    
+    // Quick date buttons
+    overlay.querySelectorAll('.quick-date-btn').forEach(btn => {
+        btn.onclick = (e) => {
+            e.preventDefault();
+            if (btn.classList.contains('clear-date')) {
+                dateInput.value = '';
+            } else {
+                const days = parseInt(btn.dataset.days, 10);
+                const date = new Date();
+                date.setDate(date.getDate() + days);
+                dateInput.value = date.toISOString().split('T')[0];
+            }
+        };
+    });
+    
+    overlay.querySelector('.plugin-modal-btn.cancel').onclick = closeModal;
+    
+    overlay.querySelector('.plugin-modal-btn.confirm').onclick = () => {
+        const newText = textInput.value.trim();
+        if (newText) {
+            addTask({
+                text: newText,
+                description: descInput.value.trim() || '',
+                sourceNote: sourceInput.value || '',
+                done: false,
+                prio: 0,
+                date: dateInput.value || '',
+                sectionId: sectionSelect.value || null
+            });
+        }
+        closeModal();
+    };
+    
+    // Allow Enter key to submit (but not in textarea)
+    textInput.onkeydown = (e) => {
+        if (e.key === 'Enter') {
+            overlay.querySelector('.plugin-modal-btn.confirm').click();
+        }
+    };
+    
+    overlay.onclick = (e) => {
+        if (e.target === overlay) closeModal();
+    };
+    
+    const escHandler = (e) => {
+        if (e.key === 'Escape') {
+            closeModal();
+            document.removeEventListener('keydown', escHandler);
+        }
+    };
+    document.addEventListener('keydown', escHandler);
+    
+    document.body.appendChild(overlay);
+    textInput.focus();
+    
+    // Return references for external population (used by floating button)
+    return { textInput, descInput, sourceInput, sourceField };
+}
+
+function showTaskCreateModalWithSelection(selectedText, noteTitle) {
+    const refs = showTaskCreateModal();
+    if (refs) {
+        // Set title to first ~50 chars of selection
+        const truncatedTitle = selectedText.length > 50 
+            ? selectedText.substring(0, 50).trim() + '...'
+            : selectedText;
+        refs.textInput.value = truncatedTitle;
+        refs.descInput.value = selectedText;
+        if (noteTitle) {
+            refs.sourceInput.value = noteTitle;
+            refs.sourceField.style.display = 'block';
+        }
+    }
+}
+
+function showTaskDescriptionModal(task, taskIndex, allTasks) {
+    const existing = document.getElementById('plugin-confirm-modal');
+    if (existing) existing.remove();
+    
+    const overlay = document.createElement('div');
+    overlay.id = 'plugin-confirm-modal';
+    overlay.className = 'plugin-modal-overlay';
+    
+    const sourceHtml = task.sourceNote 
+        ? `<div class="plugin-desc-source"><span class="source-icon">${ICONS.description}</span> ${task.sourceNote}</div>`
+        : '';
+    
+    overlay.innerHTML = `
+        <div class="plugin-modal-content plugin-desc-modal">
+            <div class="plugin-modal-title">${task.text}</div>
+            ${sourceHtml}
+            <div class="plugin-edit-field">
+                <label>Description</label>
+                <textarea class="edit-task-description" placeholder="Add details..." rows="5">${task.description || ''}</textarea>
+            </div>
+            <div class="plugin-modal-buttons">
+                <button class="plugin-modal-btn cancel">Cancel</button>
+                <button class="plugin-modal-btn confirm">Save</button>
+            </div>
+        </div>
+    `;
+    
+    const closeModal = () => overlay.remove();
+    const descInput = overlay.querySelector('.edit-task-description');
+    
+    overlay.querySelector('.plugin-modal-btn.cancel').onclick = closeModal;
+    
+    overlay.querySelector('.plugin-modal-btn.confirm').onclick = () => {
+        allTasks[taskIndex].description = descInput.value.trim();
+        saveState();
+        renderTasks();
+        closeModal();
+    };
+    
+    overlay.onclick = (e) => {
+        if (e.target === overlay) closeModal();
+    };
+    
+    const escHandler = (e) => {
+        if (e.key === 'Escape') {
+            closeModal();
+            document.removeEventListener('keydown', escHandler);
+        }
+    };
+    document.addEventListener('keydown', escHandler);
+    
+    document.body.appendChild(overlay);
+    descInput.focus();
 }
 
 // --- UTILITY: SAFE QUERY HELPERS ---
@@ -304,13 +739,23 @@ const ICONS = {
     chevron: '<svg xmlns="http://www.w3.org/2000/svg" height="18px" viewBox="0 0 24 24" width="18px" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>',
     warning: '<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="currentColor"><path d="m40-120 440-760 440 760H40Zm138-80h604L480-720 178-200Zm302-40q17 0 28.5-11.5T520-280q0-17-11.5-28.5T480-320q-17 0-28.5 11.5T440-280q0 17 11.5 28.5T480-240Zm-40-120h80v-200h-80v200Zm40-100Z"/></svg>',
     
+    moveItem: '<svg xmlns="http://www.w3.org/2000/svg" height="14px" viewBox="0 -960 960 960" width="14px" fill="currentColor"><path d="M806-440H320v-80h486l-62-62 56-58 160 160-160 160-56-58 62-62ZM600-600v-160H200v560h400v-160h80v160q0 33-23.5 56.5T600-120H200q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h400q33 0 56.5 23.5T680-760v160h-80Z"/></svg>',
+    moreHoriz: '<svg xmlns="http://www.w3.org/2000/svg" height="16px" viewBox="0 -960 960 960" width="16px" fill="currentColor"><path d="M240-400q-33 0-56.5-23.5T160-480q0-33 23.5-56.5T240-560q33 0 56.5 23.5T320-480q0 33-23.5 56.5T240-400Zm240 0q-33 0-56.5-23.5T400-480q0-33 23.5-56.5T480-560q33 0 56.5 23.5T560-480q0 33-23.5 56.5T480-400Zm240 0q-33 0-56.5-23.5T640-480q0-33 23.5-56.5T720-560q33 0 56.5 23.5T800-480q0 33-23.5 56.5T720-400Z"/></svg>',
+    description: '<svg xmlns="http://www.w3.org/2000/svg" height="14px" viewBox="0 -960 960 960" width="14px" fill="currentColor"><path d="M320-240h320v-80H320v80Zm0-160h320v-80H320v80ZM240-80q-33 0-56.5-23.5T160-160v-640q0-33 23.5-56.5T240-880h320l240 240v480q0 33-23.5 56.5T720-80H240Zm280-520v-200H240v640h480v-440H520ZM240-800v200-200 640-640Z"/></svg>',
+    addTask: '<svg xmlns="http://www.w3.org/2000/svg" height="18px" viewBox="0 -960 960 960" width="18px" fill="currentColor"><path d="M480-80q-83 0-156-31.5T197-197q-54-54-85.5-127T80-480q0-83 31.5-156T197-763q54-54 127-85.5T480-880q83 0 156 31.5T763-763q54 54 85.5 127T880-480q0 83-31.5 156T763-197q-54 54-127 85.5T480-80Zm-40-360H280v80h160v160h80v-160h160v-80H520v-160h-80v160Z"/></svg>',
+    link: '<svg xmlns="http://www.w3.org/2000/svg" height="14px" viewBox="0 -960 960 960" width="14px" fill="currentColor"><path d="M440-280H280q-83 0-141.5-58.5T80-480q0-83 58.5-141.5T280-680h160v80H280q-50 0-85 35t-35 85q0 50 35 85t85 35h160v80ZM320-440v-80h320v80H320Zm200 160v-80h160q50 0 85-35t35-85q0-50-35-85t-85-35H520v-80h160q83 0 141.5 58.5T880-480q0 83-58.5 141.5T680-280H520Z"/></svg>',
+    cancel: '<svg xmlns="http://www.w3.org/2000/svg" height="18px" viewBox="0 -960 960 960" width="18px" fill="currentColor"><path d="m336-280 144-144 144 144 56-56-144-144 144-144-56-56-144 144-144-144-56 56 144 144-144 144 56 56ZM480-80q-83 0-156-31.5T197-197q-54-54-85.5-127T80-480q0-83 31.5-156T197-763q54-54 127-85.5T480-880q83 0 156 31.5T763-763q54 54 85.5 127T880-480q0 83-31.5 156T763-197q-54 54-127 85.5T480-80Zm0-80q134 0 227-93t93-227q0-134-93-227t-227-93q-134 0-227 93t-93 227q0 134 93 227t227 93Zm0-320Z"/></svg>',
+    sortDate: '<svg xmlns="http://www.w3.org/2000/svg" height="14px" viewBox="0 -960 960 960" width="14px" fill="currentColor"><path d="M200-80q-33 0-56.5-23.5T120-160v-560q0-33 23.5-56.5T200-800h40v-80h80v80h320v-80h80v80h40q33 0 56.5 23.5T840-720v560q0 33-23.5 56.5T760-80H200Zm0-80h560v-400H200v400Zm0-480h560v-80H200v80Zm0 0v-80 80Zm280 240q-17 0-28.5-11.5T440-440q0-17 11.5-28.5T480-480q17 0 28.5 11.5T520-440q0 17-11.5 28.5T480-400Zm-160 0q-17 0-28.5-11.5T280-440q0-17 11.5-28.5T320-480q17 0 28.5 11.5T360-440q0 17-11.5 28.5T320-400Zm320 0q-17 0-28.5-11.5T600-440q0-17 11.5-28.5T640-480q17 0 28.5 11.5T680-440q0 17-11.5 28.5T640-400ZM480-240q-17 0-28.5-11.5T440-280q0-17 11.5-28.5T480-320q17 0 28.5 11.5T520-280q0 17-11.5 28.5T480-240Zm-160 0q-17 0-28.5-11.5T280-280q0-17 11.5-28.5T320-320q17 0 28.5 11.5T360-280q0 17-11.5 28.5T320-240Zm320 0q-17 0-28.5-11.5T600-280q0-17 11.5-28.5T640-320q17 0 28.5 11.5T680-280q0 17-11.5 28.5T640-240Z"/></svg>',
     deleteForever: '<svg xmlns="http://www.w3.org/2000/svg" height="18px" viewBox="0 -960 960 960" width="18px" fill="currentColor"><path d="M280-120q-33 0-56.5-23.5T200-200v-520h-40v-80h200v-40h240v40h200v80h-40v520q0 33-23.5 56.5T680-120H280Zm400-600H280v520h400v-520ZM376-280l104-104 104 104 56-56-104-104 104-104-56-56-104 104-104-104-56 56 104 104-104 104 56 56ZM280-720v520-520Z"/></svg>',
     
     // NEW ICONS FOR V17.3
     selectAll: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="currentColor"><path d="M260-160q-42 0-71-29t-29-71v-440q0-42 29-71t71-29h440q42 0 71 29t29 71v440q0 42-29 71t-71 29H260Zm0-80h440v-440H260v440Zm178-106 208-208-56-57-152 152-82-82-56 57 138 138ZM260-700v440-440Z"/></svg>',
     checkOn: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="#1a73e8"><path d="M382-240 154-468l57-57 171 171 367-367 57 57-424 424Z"/></svg>',
     checkOff: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="#5f6368"><path d="M200-120q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h560q33 0 56.5 23.5T840-760v560q0 33-23.5 56.5T760-120H200Zm0-80h560v-560H200v560Z"/></svg>',
-    checkIndet: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="#5f6368"><path d="M200-120q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h560q33 0 56.5 23.5T840-760v560q0 33-23.5 56.5T760-120H200Zm0-80h560v-560H200v560Zm120-240v-80h320v80H320Z"/></svg>'
+    checkIndet: '<svg xmlns="http://www.w3.org/2000/svg" height="20px" viewBox="0 -960 960 960" width="20px" fill="#5f6368"><path d="M200-120q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h560q33 0 56.5 23.5T840-760v560q0 33-23.5 56.5T760-120H200Zm0-80h560v-560H200v560Zm120-240v-80h320v80H320Z"/></svg>',
+    
+    // V17.9 - Pop-out window
+    newWindow: '<svg xmlns="http://www.w3.org/2000/svg" height="18px" viewBox="0 -960 960 960" width="18px" fill="currentColor"><path d="M200-120q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h240v80H200v560h560v-240h80v240q0 33-23.5 56.5T760-120H200Zm440-400v-120H520v-80h120v-120h80v120h120v80H720v120h-80Z"/></svg>'
 };
 
 // --- NOTEBOOK ID EXTRACTION ---
@@ -396,6 +841,7 @@ function init() {
     try {
         cleanup();
         checkVersionSync();
+        resetAllFeatures(); // Reset feature status on init
         
         currentNotebookId = getNotebookId();
         if (!currentNotebookId) {
@@ -441,6 +887,7 @@ function init() {
                 if (!appState.source.pinned) appState.source.pinned = [];
                 if (!appState.studio.pinned) appState.studio.pinned = [];
                 if (!appState.source.tasks) appState.source.tasks = [];
+                if (!appState.source.taskSections) appState.source.taskSections = {};
 
                 // Load search index (always local)
                 if (localResult[indexKey]) {
@@ -672,34 +1119,64 @@ function applyFocusMode() {
 }
 
 function renderTasks() {
-    try {
+    if (!isFeatureEnabled('taskManagement')) return;
+    
+    runWithGracefulDegradation('taskManagement', () => {
         const mount = document.getElementById('plugin-task-list-mount');
         const headerCount = document.getElementById('plugin-task-count');
         if (!mount) return;
         mount.innerHTML = '';
         const tasks = appState.source.tasks || [];
+        const sections = appState.source.taskSections || {};
         if (appState.settings.completedOpen === undefined) appState.settings.completedOpen = false;
-        const activeItems = [];
-        const doneItems = [];
+        
+        // Separate tasks by section and completion status
+        const uncategorizedActive = [];
+        const uncategorizedDone = [];
+        const sectionedTasks = {}; // sectionId -> { active: [], done: [] }
+        
         tasks.forEach((task, index) => {
             const item = { ...task, originalIndex: index };
-            if (task.done) doneItems.push(item); else activeItems.push(item);
+            const sectionId = task.sectionId || null;
+            
+            if (task.done) {
+                uncategorizedDone.push(item); // All completed go to main Completed section
+            } else if (sectionId && sections[sectionId]) {
+                if (!sectionedTasks[sectionId]) sectionedTasks[sectionId] = [];
+                sectionedTasks[sectionId].push(item);
+            } else {
+                uncategorizedActive.push(item);
+            }
         });
-        if (headerCount) headerCount.innerText = activeItems.length > 0 ? `(${activeItems.length})` : '';
+        
+        const totalActive = tasks.filter(t => !t.done).length;
+        if (headerCount) headerCount.innerText = totalActive > 0 ? `(${totalActive})` : '';
 
-        if (tasks.length === 0) {
+        if (tasks.length === 0 && Object.keys(sections).length === 0) {
             mount.innerHTML = '<div style="padding:12px; font-style:italic; color:var(--plugin-text-secondary); font-size:12px; text-align:center;">No tasks...</div>';
             return;
         }
-        activeItems.forEach(item => mount.appendChild(createTaskElement(item, item.originalIndex, tasks, false)));
-        if (doneItems.length > 0) {
+        
+        // Render uncategorized active tasks first
+        uncategorizedActive.forEach(item => mount.appendChild(createTaskElement(item, item.originalIndex, tasks, false)));
+        
+        // Render custom sections
+        const sortedSections = Object.values(sections).sort((a, b) => (a.order || 0) - (b.order || 0));
+        sortedSections.forEach(section => {
+            const sectionTasks = sectionedTasks[section.id] || [];
+            const sectionEl = createTaskSectionElement(section, sectionTasks, tasks);
+            mount.appendChild(sectionEl);
+        });
+        
+        // Render completed section (all done tasks regardless of original section)
+        if (uncategorizedDone.length > 0) {
             const completedGroup = document.createElement('div');
             completedGroup.className = 'plugin-completed-group';
             const isOpen = appState.settings.completedOpen;
             const arrowClass = isOpen ? 'arrow open' : 'arrow';
             completedGroup.innerHTML = `
                 <div class="plugin-completed-header">
-                    <div style="display:flex; align-items:center; gap:4px;"><span class="${arrowClass}">${ICONS.chevron}</span> Completed (${doneItems.length})</div>
+                    <div style="display:flex; align-items:center; gap:4px;"><span class="${arrowClass}">${ICONS.chevron}</span> Completed (${uncategorizedDone.length})</div>
                     <div class="plugin-header-btn clear-done-btn" title="Clear All Completed">${ICONS.deleteForever}</div>
                 </div>
                 <div class="plugin-completed-body" style="display:${isOpen ? 'block' : 'none'}"></div>
@@ -717,7 +1194,7 @@ function renderTasks() {
             if (clearBtn) {
                 clearBtn.onclick = (e) => {
                     e.stopPropagation();
-                    showConfirmModal(`Remove ${doneItems.length} completed tasks?`, () => {
+                    showConfirmModal(`Remove ${uncategorizedDone.length} completed tasks?`, () => {
                         appState.source.tasks = appState.source.tasks.filter(t => !t.done);
                         saveState();
                         renderTasks();
@@ -726,12 +1203,225 @@ function renderTasks() {
             }
             const body = completedGroup.querySelector('.plugin-completed-body');
             if (body) {
-                doneItems.forEach(item => body.appendChild(createTaskElement(item, item.originalIndex, tasks, true)));
+                uncategorizedDone.forEach(item => body.appendChild(createTaskElement(item, item.originalIndex, tasks, true)));
             }
             mount.appendChild(completedGroup);
         }
+    });
+}
+
+function createTaskSectionElement(section, sectionTasks, allTasks) {
+    const sectionEl = document.createElement('div');
+    sectionEl.className = 'plugin-task-section-group';
+    sectionEl.dataset.sectionId = section.id;
+    
+    const isOpen = section.isOpen !== false; // Default to open
+    const arrowClass = isOpen ? 'arrow open' : 'arrow';
+    const colorStyle = section.color ? `border-left: 3px solid ${section.color};` : '';
+    
+    sectionEl.innerHTML = `
+        <div class="plugin-task-section-header" style="${colorStyle}">
+            <div style="display:flex; align-items:center; gap:4px;">
+                <span class="${arrowClass}">${ICONS.chevron}</span>
+                <span class="section-name">${section.name}</span>
+                <span class="section-count">(${sectionTasks.length})</span>
+            </div>
+            <div class="plugin-section-actions">
+                <span class="plugin-section-btn add-task" title="Add Task to Section">${ICONS.add}</span>
+                <span class="plugin-section-btn move-up" title="Move Up">${ICONS.smallUp}</span>
+                <span class="plugin-section-btn move-down" title="Move Down">${ICONS.smallDown}</span>
+                <span class="plugin-section-btn color-pick" title="Color">${ICONS.palette}</span>
+                <span class="plugin-section-btn rename" title="Rename">${ICONS.edit}</span>
+                <span class="plugin-section-btn delete" title="Delete Section">${ICONS.close}</span>
+            </div>
+        </div>
+        <div class="plugin-task-section-body" style="display:${isOpen ? 'block' : 'none'}"></div>
+    `;
+    
+    const header = sectionEl.querySelector('.plugin-task-section-header');
+    if (header) {
+        header.onclick = (e) => {
+            if (e.target.closest('.plugin-section-actions')) return;
+            section.isOpen = !section.isOpen;
+            saveState();
+            renderTasks();
+        };
+    }
+    
+    // Section action handlers
+    const addTaskBtn = sectionEl.querySelector('.plugin-section-btn.add-task');
+    if (addTaskBtn) {
+        addTaskBtn.onclick = (e) => {
+            e.stopPropagation();
+            showTaskCreateModal(section.id);
+        };
+    }
+    
+    const moveUpBtn = sectionEl.querySelector('.plugin-section-btn.move-up');
+    if (moveUpBtn) {
+        moveUpBtn.onclick = (e) => {
+            e.stopPropagation();
+            moveTaskSection(section.id, -1);
+        };
+    }
+    
+    const moveDownBtn = sectionEl.querySelector('.plugin-section-btn.move-down');
+    if (moveDownBtn) {
+        moveDownBtn.onclick = (e) => {
+            e.stopPropagation();
+            moveTaskSection(section.id, 1);
+        };
+    }
+    
+    const colorBtn = sectionEl.querySelector('.plugin-section-btn.color-pick');
+    if (colorBtn) {
+        colorBtn.onclick = (e) => {
+            e.stopPropagation();
+            const colors = [null, '#e8eaed', '#f28b82', '#fbbc04', '#34a853', '#4285f4', '#d93025'];
+            const cur = section.color || null;
+            const next = colors[(colors.indexOf(cur) + 1) % colors.length];
+            section.color = next;
+            saveState();
+            renderTasks();
+        };
+    }
+    
+    const renameBtn = sectionEl.querySelector('.plugin-section-btn.rename');
+    if (renameBtn) {
+        renameBtn.onclick = (e) => {
+            e.stopPropagation();
+            const newName = prompt("Rename section:", section.name);
+            if (newName && newName.trim()) {
+                section.name = newName.trim();
+                saveState();
+                renderTasks();
+            }
+        };
+    }
+    
+    const deleteBtn = sectionEl.querySelector('.plugin-section-btn.delete');
+    if (deleteBtn) {
+        deleteBtn.onclick = (e) => {
+            e.stopPropagation();
+            showConfirmModal(`Delete section "${section.name}"?<br><br>Tasks will be moved to uncategorized.`, () => {
+                // Move tasks back to uncategorized
+                appState.source.tasks.forEach(t => {
+                    if (t.sectionId === section.id) t.sectionId = null;
+                });
+                delete appState.source.taskSections[section.id];
+                saveState();
+                renderTasks();
+            });
+        };
+    }
+    
+    // Render tasks in this section
+    const body = sectionEl.querySelector('.plugin-task-section-body');
+    if (body) {
+        sectionTasks.forEach(item => body.appendChild(createTaskElement(item, item.originalIndex, allTasks, false)));
+    }
+    
+    return sectionEl;
+}
+
+function createTaskSection(name) {
+    if (!appState.source.taskSections) appState.source.taskSections = {};
+    const id = Math.random().toString(36).substr(2, 9);
+    const count = Object.keys(appState.source.taskSections).length;
+    appState.source.taskSections[id] = { 
+        id, 
+        name, 
+        isOpen: true, 
+        order: count,
+        color: null
+    };
+    saveState();
+    renderTasks();
+}
+
+function moveTaskSection(sectionId, direction) {
+    const sections = Object.values(appState.source.taskSections || {});
+    const target = appState.source.taskSections[sectionId];
+    if (!target) return;
+    
+    sections.sort((a, b) => (a.order || 0) - (b.order || 0));
+    sections.forEach((s, i) => s.order = i);
+    
+    const idx = sections.findIndex(s => s.id === sectionId);
+    const newIdx = idx + direction;
+    
+    if (newIdx >= 0 && newIdx < sections.length) {
+        const swap = sections[newIdx];
+        [target.order, swap.order] = [swap.order, target.order];
+        saveState();
+        renderTasks();
+    }
+}
+
+function showTaskMoveMenu(e, taskIndex) {
+    try {
+        document.querySelectorAll('.plugin-dropdown').forEach(el => el.remove());
+        const menu = document.createElement('div');
+        menu.className = 'plugin-dropdown';
+        
+        const task = appState.source.tasks[taskIndex];
+        const sections = appState.source.taskSections || {};
+        
+        // Option to move to uncategorized (if currently in a section)
+        if (task.sectionId) {
+            const item = document.createElement('div');
+            item.className = 'plugin-dropdown-item';
+            item.innerHTML = `${ICONS.eject} Uncategorized`;
+            item.onclick = (ev) => {
+                ev.stopPropagation();
+                task.sectionId = null;
+                saveState();
+                renderTasks();
+                menu.remove();
+            };
+            menu.appendChild(item);
+        }
+        
+        // List all sections
+        const sortedSections = Object.values(sections).sort((a, b) => (a.order || 0) - (b.order || 0));
+        if (sortedSections.length === 0 && !task.sectionId) {
+            const empty = document.createElement('div');
+            empty.className = 'plugin-dropdown-item';
+            empty.style.fontStyle = 'italic';
+            empty.innerText = "No sections created";
+            menu.appendChild(empty);
+        }
+        
+        sortedSections.forEach(section => {
+            if (section.id === task.sectionId) return; // Skip current section
+            const item = document.createElement('div');
+            item.className = 'plugin-dropdown-item';
+            const colorDot = section.color ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${section.color};margin-right:6px;"></span>` : '';
+            item.innerHTML = `${colorDot}${section.name}`;
+            item.onclick = (ev) => {
+                ev.stopPropagation();
+                task.sectionId = section.id;
+                saveState();
+                renderTasks();
+                menu.remove();
+            };
+            menu.appendChild(item);
+        });
+        
+        document.body.appendChild(menu);
+        const rect = e.target.getBoundingClientRect();
+        menu.style.top = (rect.bottom + window.scrollY) + 'px';
+        menu.style.left = rect.left + 'px';
+        
+        setTimeout(() => {
+            const close = () => {
+                menu.remove();
+                document.removeEventListener('click', close);
+            };
+            document.addEventListener('click', close);
+        }, DOM_SETTLE_DELAY_MS);
     } catch (e) {
-        console.debug('[NotebookLM Tree] Render tasks error:', e.message);
+        console.debug('[NotebookLM Tree] Show task move menu error:', e.message);
     }
 }
 
@@ -745,9 +1435,24 @@ function createTaskElement(task, realIndex, allTasks, isCompletedSection) {
         dateHtml = `<div class="plugin-task-date" style="${colorStyle}">${ICONS.calendar} ${task.date}</div>`;
     }
     const moveActions = isCompletedSection ? '' : `
+        <div class="plugin-task-btn move-section" title="Move to Section">${ICONS.moveItem}</div>
         <div class="plugin-task-btn up" title="Move Up">${ICONS.smallUp}</div>
         <div class="plugin-task-btn down" title="Move Down">${ICONS.smallDown}</div>
     `;
+    
+    // Description button - highlighted blue if has description
+    const hasDesc = task.description && task.description.trim().length > 0;
+    const descClass = hasDesc ? 'has-desc' : '';
+    const descTooltip = hasDesc 
+        ? task.description.substring(0, 100).replace(/"/g, '&quot;') + (task.description.length > 100 ? '...' : '')
+        : 'Add description';
+    
+    // Link button - only shown if task has sourceNote
+    const hasSource = task.sourceNote && task.sourceNote.trim().length > 0;
+    const linkBtn = hasSource 
+        ? `<div class="plugin-task-btn link has-link" title="Show in Studio: ${task.sourceNote.replace(/"/g, '&quot;')}">${ICONS.link}</div>`
+        : '';
+    
     div.innerHTML = `
         <div class="plugin-task-check">${task.done ? ICONS.check : ''}</div>
         <div class="plugin-task-content">
@@ -755,6 +1460,8 @@ function createTaskElement(task, realIndex, allTasks, isCompletedSection) {
             ${dateHtml}
         </div>
         <div class="plugin-task-actions">
+            ${linkBtn}
+            <div class="plugin-task-btn desc ${descClass}" title="${descTooltip}">${ICONS.description}</div>
             <div class="plugin-task-btn prio" title="Priority (Red/Yel/Blu)">${ICONS.flag}</div>
             <div class="plugin-task-btn edit" title="Edit">${ICONS.edit}</div>
             ${moveActions}
@@ -772,6 +1479,23 @@ function createTaskElement(task, realIndex, allTasks, isCompletedSection) {
         };
     }
     
+    // Link button handler - filter Studio panel to show source note
+    const linkBtnEl = div.querySelector('.plugin-task-btn.link');
+    if (linkBtnEl && hasSource) {
+        linkBtnEl.onclick = (e) => {
+            e.stopPropagation();
+            filterStudioToNote(task.sourceNote);
+        };
+    }
+    
+    const descBtn = div.querySelector('.plugin-task-btn.desc');
+    if (descBtn) {
+        descBtn.onclick = (e) => {
+            e.stopPropagation();
+            showTaskDescriptionModal(task, realIndex, allTasks);
+        };
+    }
+    
     const prioBtn = div.querySelector('.plugin-task-btn.prio');
     if (prioBtn) {
         prioBtn.onclick = (e) => {
@@ -786,14 +1510,22 @@ function createTaskElement(task, realIndex, allTasks, isCompletedSection) {
     if (editBtn) {
         editBtn.onclick = (e) => {
             e.stopPropagation();
-            const newText = prompt("Edit Task:", task.text);
-            if (newText !== null) {
-                allTasks[realIndex].text = newText;
-                const newDate = prompt("Set Due Date (YYYY-MM-DD) or leave empty:", task.date || "");
-                if (newDate !== null) allTasks[realIndex].date = newDate;
+            showTaskEditModal(task, (updated) => {
+                allTasks[realIndex].text = updated.text;
+                allTasks[realIndex].description = updated.description;
+                allTasks[realIndex].date = updated.date;
+                allTasks[realIndex].sectionId = updated.sectionId;
                 saveState();
                 renderTasks();
-            }
+            });
+        };
+    }
+    
+    const moveSectionBtn = div.querySelector('.plugin-task-btn.move-section');
+    if (moveSectionBtn) {
+        moveSectionBtn.onclick = (e) => {
+            e.stopPropagation();
+            showTaskMoveMenu(e, realIndex);
         };
     }
     
@@ -837,6 +1569,8 @@ function createTaskElement(task, realIndex, allTasks, isCompletedSection) {
 }
 
 function addTask(taskObj) {
+    if (!isFeatureEnabled('taskManagement')) return;
+    
     if (!appState.source.tasks) appState.source.tasks = [];
     if (typeof taskObj === 'string') {
         appState.source.tasks.push({ text: taskObj, done: false, prio: 0, date: "" });
@@ -885,7 +1619,9 @@ function editDistance(s1, s2) {
 }
 
 function saveToIndex(title, content) {
-    try {
+    if (!isFeatureEnabled('searchIndexing')) return;
+    
+    runWithGracefulDegradation('searchIndexing', () => {
         if (!title || !content || content.length < 5) return;
         const indexKey = getStorageKey('notebookSearchIndex');
         if (!indexKey) return;
@@ -925,9 +1661,7 @@ function saveToIndex(title, content) {
         searchIndexAccessTimes[key] = Date.now();
         chrome.storage.local.set({ [indexKey]: searchIndex });
         updateSearchStats('studio');
-    } catch (e) {
-        console.debug('[NotebookLM Tree] Save to index error:', e.message);
-    }
+    }, true); // silent = true, don't show toast for indexing failures
 }
 
 function decompressContent(compressedContent, key) {
@@ -1024,12 +1758,48 @@ function filterProxies(context, query) {
     }
 }
 
+function filterStudioToNote(noteTitle) {
+    try {
+        if (!noteTitle) return;
+        
+        // Find the Studio search input
+        const studioRoot = document.getElementById('plugin-studio-root');
+        if (!studioRoot) {
+            showToast("Studio panel not found");
+            return;
+        }
+        
+        const searchInput = studioRoot.querySelector('.plugin-search-area input');
+        const clearBtn = studioRoot.querySelector('.plugin-search-area .search-clear-btn');
+        if (searchInput) {
+            // Set the search input value
+            searchInput.value = noteTitle;
+            // Trigger the filter
+            filterProxies('studio', noteTitle);
+            // Show the clear button
+            if (clearBtn) clearBtn.classList.add('visible');
+            // Focus the input so user can easily clear it
+            searchInput.focus();
+            searchInput.select();
+        } else {
+            // If no search input, just filter directly
+            filterProxies('studio', noteTitle);
+        }
+        
+        showToast(`Filtered to: ${noteTitle}`);
+    } catch (e) {
+        console.debug('[NotebookLM Tree] Filter studio to note error:', e.message);
+    }
+}
+
 function rebuildSearchIndex() {
     showConfirmModal("Rebuild Search Index?<br><br>This will clear your local search cache.", () => {
         searchIndex = {};
         searchIndexAccessTimes = {};
         const indexKey = getStorageKey('notebookSearchIndex');
         if (indexKey) chrome.storage.local.remove(indexKey);
+        // Reset search indexing feature if it was disabled
+        resetFeature('searchIndexing');
         updateSearchStats('studio');
         showToast("Index cleared. Please click your notes to re-index them.");
     });
@@ -1069,10 +1839,10 @@ function exportFolders() {
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-        showToast("Ã¢Å“â€œ Config exported");
+        showToast("ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã¢â‚¬Å“ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œ Config exported");
     } catch (e) {
         console.error('[NotebookLM Tree] Export failed:', e);
-        showToast("Ã¢Å¡Â Ã¯Â¸Â Export failed");
+        showToast("ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¸Ãƒâ€šÃ‚Â Export failed");
     }
 }
 
@@ -1184,11 +1954,11 @@ function startObserver() {
 }
 
 function safeDetectAndIndexActiveNote() {
-    try {
+    if (!isFeatureEnabled('searchIndexing')) return;
+    
+    runWithGracefulDegradation('searchIndexing', () => {
         detectAndIndexActiveNote();
-    } catch (e) {
-        console.debug('[NotebookLM Tree] Index note error:', e.message);
-    }
+    }, true); // silent = true
 }
 
 function detectAndIndexActiveNote() {
@@ -1204,19 +1974,17 @@ function detectAndIndexActiveNote() {
 }
 
 function safeRunOrganizer() {
-    try {
+    runWithGracefulDegradation('folderOrganization', () => {
         runOrganizer();
-    } catch (e) {
-        console.error('[NotebookLM Tree] Organizer error:', e);
-    }
+    });
 }
 
 function safeProcessItems(context) {
-    try {
+    if (!isFeatureEnabled('folderOrganization')) return;
+    
+    runWithGracefulDegradation('folderOrganization', () => {
         processItems(context);
-    } catch (e) {
-        console.debug('[NotebookLM Tree] Process items error:', e.message);
-    }
+    });
 }
 
 function runOrganizer() {
@@ -1358,16 +2126,52 @@ function injectContainer(anchorEl, context) {
             const taskSection = document.createElement('div');
             taskSection.className = 'plugin-task-section';
             const arrowClass = appState.settings.tasksOpen ? 'arrow open' : 'arrow';
+            
+            // Build section options for dropdown
+            const sections = appState.source.taskSections || {};
+            const sortedSections = Object.values(sections).sort((a, b) => (a.order || 0) - (b.order || 0));
+            let sectionOptionsHtml = '<option value="">No Section</option>';
+            sortedSections.forEach(s => {
+                sectionOptionsHtml += `<option value="${s.id}">${s.name}</option>`;
+            });
+            
             taskSection.innerHTML = `
                 <div class="plugin-task-header">
                     <div style="display:flex; align-items:center; gap:4px;">
                         <span class="${arrowClass}">${ICONS.chevron}</span> 
                         Tasks <span id="plugin-task-count" style="font-size:11px; opacity:0.7;"></span>
                     </div>
-                    <div class="plugin-task-header-actions"><div class="plugin-header-btn sort-tasks" title="Sort by Priority">${ICONS.sort}</div></div>
+                    <div class="plugin-task-header-actions">
+                        <div class="plugin-header-btn add-section" title="Add Section">${ICONS.newFolder}</div>
+                        <div class="plugin-header-btn sort-tasks-date" title="Sort by Due Date">${ICONS.sortDate}</div>
+                        <div class="plugin-header-btn sort-tasks" title="Sort by Priority">${ICONS.sort}</div>
+                    </div>
                 </div>
                 <div class="plugin-task-body" style="display:${appState.settings.tasksOpen ? 'block' : 'none'}">
-                    <div class="plugin-task-input-area"><input type="text" placeholder="Add task..." /><button class="plugin-btn secondary add-task-btn">${ICONS.add}</button></div>
+                    <div class="plugin-task-input-area">
+                        <input type="text" class="task-text-input" placeholder="Add task..." />
+                        <button class="plugin-btn secondary expand-options-btn" title="More Options">${ICONS.moreHoriz}</button>
+                        <button class="plugin-btn secondary add-task-btn">${ICONS.add}</button>
+                    </div>
+                    <div class="plugin-task-options" style="display:none;">
+                        <div class="plugin-task-options-row">
+                            <label>
+                                <span class="option-label">${ICONS.calendar} Due</span>
+                                <input type="date" class="task-date-input" />
+                            </label>
+                            <div class="quick-date-btns">
+                                <button class="quick-date-btn" data-days="0">Today</button>
+                                <button class="quick-date-btn" data-days="1">Tomorrow</button>
+                                <button class="quick-date-btn" data-days="7">+1 Week</button>
+                            </div>
+                        </div>
+                        <div class="plugin-task-options-row">
+                            <label>
+                                <span class="option-label">${ICONS.folder} Section</span>
+                                <select class="task-section-select">${sectionOptionsHtml}</select>
+                            </label>
+                        </div>
+                    </div>
                     <div id="plugin-task-list-mount" class="plugin-task-list"></div>
                 </div>
             `;
@@ -1404,14 +2208,96 @@ function injectContainer(anchorEl, context) {
                     }
                 };
             }
-            const taskInput = taskSection.querySelector('input');
+            const addSectionBtn = taskSection.querySelector('.add-section');
+            if (addSectionBtn) {
+                addSectionBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    const name = prompt("Section Name:");
+                    if (name && name.trim()) {
+                        createTaskSection(name.trim());
+                        showToast("Section created");
+                        // Refresh the section dropdown
+                        const select = taskSection.querySelector('.task-section-select');
+                        if (select) {
+                            const newOption = document.createElement('option');
+                            newOption.value = Object.keys(appState.source.taskSections).pop();
+                            newOption.textContent = name.trim();
+                            select.appendChild(newOption);
+                        }
+                    }
+                };
+            }
+            
+            // Sort by date handler
+            const sortDateBtn = taskSection.querySelector('.sort-tasks-date');
+            if (sortDateBtn) {
+                sortDateBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    if (appState.source.tasks && appState.source.tasks.length > 0) {
+                        appState.source.tasks.sort((a, b) => {
+                            // Tasks with no date go to the end
+                            if (!a.date && !b.date) return 0;
+                            if (!a.date) return 1;
+                            if (!b.date) return -1;
+                            return new Date(a.date) - new Date(b.date);
+                        });
+                        saveState();
+                        renderTasks();
+                        showToast("Tasks sorted by Due Date");
+                    }
+                };
+            }
+            
+            const taskInput = taskSection.querySelector('.task-text-input');
+            const taskDateInput = taskSection.querySelector('.task-date-input');
+            const taskSectionSelect = taskSection.querySelector('.task-section-select');
+            const taskOptionsPanel = taskSection.querySelector('.plugin-task-options');
+            const expandOptionsBtn = taskSection.querySelector('.expand-options-btn');
             const addTaskBtn = taskSection.querySelector('.add-task-btn');
+            
+            // Toggle options panel
+            if (expandOptionsBtn && taskOptionsPanel) {
+                expandOptionsBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    const isVisible = taskOptionsPanel.style.display !== 'none';
+                    taskOptionsPanel.style.display = isVisible ? 'none' : 'block';
+                    expandOptionsBtn.classList.toggle('active', !isVisible);
+                };
+            }
+            
+            // Quick date buttons
+            const quickDateBtns = taskSection.querySelectorAll('.quick-date-btn');
+            quickDateBtns.forEach(btn => {
+                btn.onclick = (e) => {
+                    e.stopPropagation();
+                    const days = parseInt(btn.dataset.days, 10);
+                    const date = new Date();
+                    date.setDate(date.getDate() + days);
+                    const dateStr = date.toISOString().split('T')[0];
+                    if (taskDateInput) taskDateInput.value = dateStr;
+                };
+            });
+            
             const addTaskHandler = () => {
                 if (taskInput) {
                     const val = taskInput.value.trim();
                     if (val) {
-                        addTask({ text: val, done: false, prio: 0, date: "" });
+                        // Quick add: use inline options if provided
+                        const dateVal = taskDateInput ? taskDateInput.value : '';
+                        const sectionVal = taskSectionSelect ? taskSectionSelect.value : '';
+                        addTask({ 
+                            text: val, 
+                            done: false, 
+                            prio: 0, 
+                            date: dateVal,
+                            sectionId: sectionVal || null
+                        });
                         taskInput.value = '';
+                        if (taskDateInput) taskDateInput.value = '';
+                        if (taskSectionSelect) taskSectionSelect.value = '';
+                    } else {
+                        // No text: open full create modal
+                        showTaskCreateModal();
                     }
                 }
             };
@@ -1442,11 +2328,29 @@ function injectContainer(anchorEl, context) {
             
             const searchDiv = document.createElement('div');
             searchDiv.className = 'plugin-search-area';
-            searchDiv.innerHTML = `<input type="text" placeholder="Search titles...">`;
+            searchDiv.innerHTML = `
+                <input type="text" placeholder="Search titles...">
+                <span class="search-clear-btn" title="Clear search">${ICONS.cancel}</span>
+            `;
             const debouncedFilter = debounce((value) => filterProxies(context, value), DEBOUNCE_SEARCH_MS);
             const searchInput = searchDiv.querySelector('input');
+            const clearBtn = searchDiv.querySelector('.search-clear-btn');
             if (searchInput) {
-                searchInput.oninput = (e) => { debouncedFilter(e.target.value); };
+                searchInput.oninput = (e) => { 
+                    debouncedFilter(e.target.value);
+                    // Show/hide clear button based on input content
+                    if (clearBtn) clearBtn.classList.toggle('visible', e.target.value.length > 0);
+                };
+            }
+            if (clearBtn) {
+                clearBtn.onclick = () => {
+                    if (searchInput) {
+                        searchInput.value = '';
+                        filterProxies(context, '');
+                        clearBtn.classList.remove('visible');
+                        searchInput.focus();
+                    }
+                };
             }
             container.appendChild(searchDiv);
         }
@@ -1517,7 +2421,9 @@ function injectContainer(anchorEl, context) {
 }
 
 function renderTree(context) {
-    try {
+    if (!isFeatureEnabled('treeRendering')) return;
+    
+    runWithGracefulDegradation('treeRendering', () => {
         const mount = document.getElementById(`tree-mount-${context}`);
         if (!mount) return;
         const fragment = document.createDocumentFragment();
@@ -1526,9 +2432,7 @@ function renderTree(context) {
         roots.forEach(root => fragment.appendChild(buildFolderNode(root, folders, context)));
         mount.innerHTML = '';
         mount.appendChild(fragment);
-    } catch (e) {
-        console.debug('[NotebookLM Tree] Render tree error:', e.message);
-    }
+    });
 }
 
 function buildFolderNode(folder, allFolders, context) {
@@ -1541,13 +2445,17 @@ function buildFolderNode(folder, allFolders, context) {
     header.className = 'plugin-folder-header';
     header.style.cssText = style;
 
-    // Added folder-check icon for V17.3
+    // Folder-check only for source context (V17.3)
+    const folderCheckHtml = context === 'source' 
+        ? `<span class="action-icon folder-check" title="Toggle Folder Items">${ICONS.checkOff}</span>`
+        : '';
+    
     header.innerHTML = `
         <span class="arrow">${ICONS.chevron}</span>
         <span class="folder-icon" style="color:${folder.color || '#8ab4f8'}">${ICONS.folder}</span>
         <span class="folder-name"></span>
         <div class="folder-actions">
-             <span class="action-icon folder-check" title="Toggle Folder Items">${ICONS.checkOff}</span>
+             ${folderCheckHtml}
              <span class="action-icon move-up" title="Move Up">${ICONS.up}</span>
              <span class="action-icon move-down" title="Move Down">${ICONS.down}</span>
              <span class="action-icon color-pick" title="Color">${ICONS.palette}</span>
@@ -1568,13 +2476,15 @@ function buildFolderNode(folder, allFolders, context) {
         setTimeout(() => safeProcessItems(context), DOM_SETTLE_DELAY_MS);
     };
 
-    // --- [NEW HANDLER] ---
-    const checkBtn = header.querySelector('.folder-check');
-    if (checkBtn) {
-        checkBtn.onclick = (e) => {
-            e.stopPropagation();
-            toggleFolderItems(folder.id, context);
-        };
+    // --- [NEW HANDLER] - Source panel only ---
+    if (context === 'source') {
+        const checkBtn = header.querySelector('.folder-check');
+        if (checkBtn) {
+            checkBtn.onclick = (e) => {
+                e.stopPropagation();
+                toggleFolderItems(folder.id, context);
+            };
+        }
     }
 
     const moveUpBtn = header.querySelector('.move-up');
@@ -1800,12 +2710,16 @@ function isPinned(context, title) {
 }
 
 function togglePin(context, title) {
-    if (!appState[context].pinned) appState[context].pinned = [];
-    const idx = appState[context].pinned.indexOf(title);
-    if (idx > -1) appState[context].pinned.splice(idx, 1);
-    else appState[context].pinned.push(title);
-    saveState();
-    safeProcessItems(context);
+    if (!isFeatureEnabled('pinning')) return;
+    
+    runWithGracefulDegradation('pinning', () => {
+        if (!appState[context].pinned) appState[context].pinned = [];
+        const idx = appState[context].pinned.indexOf(title);
+        if (idx > -1) appState[context].pinned.splice(idx, 1);
+        else appState[context].pinned.push(title);
+        saveState();
+        safeProcessItems(context);
+    });
 }
 
 function createProxyItem(nativeRow, text, context, isPinnedView) {
@@ -1881,7 +2795,7 @@ function createProxyItem(nativeRow, text, context, isPinnedView) {
             }
         } else {
             iconElement = document.createElement('span');
-            iconElement.innerText = 'Ã°Å¸â€œâ€ž';
+            iconElement.innerText = 'ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾';
             iconElement.style.marginRight = '8px';
         }
     } else {
@@ -1939,6 +2853,24 @@ function createProxyItem(nativeRow, text, context, isPinnedView) {
     const actionsDiv = document.createElement('div');
     actionsDiv.className = 'proxy-actions';
 
+    // Pop-out button (Studio panel only - for notes)
+    if (context === 'studio') {
+        const popoutBtn = document.createElement('span');
+        popoutBtn.className = 'plugin-popout-btn';
+        popoutBtn.title = "Open in new window";
+        popoutBtn.innerHTML = ICONS.newWindow;
+        popoutBtn.onclick = (e) => {
+            e.stopPropagation();
+            // Call the pop-out handler (registered by note-popout.js)
+            if (window.NotebookLMTree && window.NotebookLMTree.openNotePopout) {
+                window.NotebookLMTree.openNotePopout(text, nativeRow);
+            } else {
+                showToast('Pop-out feature initializing...');
+            }
+        };
+        actionsDiv.appendChild(popoutBtn);
+    }
+
     const ejectBtn = document.createElement('span');
     ejectBtn.className = 'pin-btn';
     ejectBtn.title = "Eject";
@@ -1968,7 +2900,7 @@ function createProxyItem(nativeRow, text, context, isPinnedView) {
     if (!isPinnedView) injectMoveTrigger(proxy, text, context);
     
     proxy.onclick = (e) => {
-        if (e.target.closest('.plugin-move-trigger') || e.target.closest('.pin-btn') || e.target.closest('.plugin-item-check')) return;
+        if (e.target.closest('.plugin-move-trigger') || e.target.closest('.pin-btn') || e.target.closest('.plugin-item-check') || e.target.closest('.plugin-popout-btn')) return;
         
         if (context === 'source') {
             const titleEl = safeQuery(nativeRow, activeSelectors.sourceTitle);
@@ -2130,5 +3062,143 @@ function getFlatList(context) {
     return arr;
 }
 
+// --- FLOATING TASK BUTTON FOR TEXT SELECTION ---
+let floatingTaskBtn = null;
+
+function setupFloatingTaskButton() {
+    // Remove any existing button
+    if (floatingTaskBtn) {
+        floatingTaskBtn.remove();
+        floatingTaskBtn = null;
+    }
+    
+    document.addEventListener('mouseup', handleTextSelection);
+    document.addEventListener('mousedown', hideFloatingButton);
+}
+
+function handleTextSelection(e) {
+    // Don't show if clicking on our own UI
+    if (e.target.closest('.plugin-container') || e.target.closest('.plugin-modal-overlay')) {
+        return;
+    }
+    
+    // Small delay to let selection settle
+    setTimeout(() => {
+        const selection = window.getSelection();
+        const selectedText = selection ? selection.toString().trim() : '';
+        
+        if (selectedText.length < 3) {
+            hideFloatingButton();
+            return;
+        }
+        
+        // Check if selection is within a note editor
+        const anchorNode = selection.anchorNode;
+        if (!anchorNode) {
+            hideFloatingButton();
+            return;
+        }
+        
+        const editorParent = anchorNode.parentElement?.closest('.ql-editor, .ProseMirror, [contenteditable="true"], .note-body');
+        if (!editorParent) {
+            hideFloatingButton();
+            return;
+        }
+        
+        // Get selection position
+        const range = selection.getRangeAt(0);
+        const rect = range.getBoundingClientRect();
+        
+        showFloatingButton(rect, selectedText);
+    }, 10);
+}
+
+function showFloatingButton(rect, selectedText) {
+    hideFloatingButton();
+    
+    floatingTaskBtn = document.createElement('div');
+    floatingTaskBtn.className = 'plugin-floating-task-btn';
+    floatingTaskBtn.title = 'Create task from selection';
+    floatingTaskBtn.innerHTML = ICONS.addTask;
+    
+    // Position above the selection
+    floatingTaskBtn.style.left = `${rect.left + rect.width / 2 - 16 + window.scrollX}px`;
+    floatingTaskBtn.style.top = `${rect.top - 40 + window.scrollY}px`;
+    
+    floatingTaskBtn.onclick = (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        
+        // Get the note title
+        const titleEl = safeQuery(document, activeSelectors.activeNoteTitle);
+        const noteTitle = titleEl ? (safeGetText(titleEl) || titleEl.value || '') : '';
+        
+        // Open modal with selection data
+        showTaskCreateModalWithSelection(selectedText, noteTitle);
+        
+        // Clear selection and hide button
+        window.getSelection().removeAllRanges();
+        hideFloatingButton();
+    };
+    
+    document.body.appendChild(floatingTaskBtn);
+}
+
+function hideFloatingButton(e) {
+    // Don't hide if clicking the button itself
+    if (e && e.target.closest('.plugin-floating-task-btn')) {
+        return;
+    }
+    
+    if (floatingTaskBtn) {
+        floatingTaskBtn.remove();
+        floatingTaskBtn = null;
+    }
+}
+
 // --- START ---
+setupFloatingTaskButton();
+
+// --- NAMESPACE BRIDGE FOR MODULES ---
+// Exposes core functionality for use by other extension modules (e.g., note-popout.js)
+window.NotebookLMTree = {
+    // State accessors
+    getState: () => appState,
+    getSearchIndex: () => searchIndex,
+    getSelectors: () => activeSelectors,
+    
+    // Utility functions
+    safeQuery,
+    safeQueryAll,
+    safeGetText,
+    safeClick,
+    showToast,
+    showConfirmModal,
+    decompressContent,
+    normalizeKey,
+    
+    // Icons
+    ICONS,
+    
+    // Feature check
+    isFeatureEnabled,
+    
+    // Hooks for module registration
+    hooks: {
+        onProxyCreated: [],      // Called when a proxy item is created
+        onTreeRendered: [],      // Called after tree is rendered
+        onNoteOpened: []         // Called when a note is opened/indexed
+    },
+    
+    // Hook trigger helper
+    triggerHook: (hookName, ...args) => {
+        const hooks = window.NotebookLMTree.hooks[hookName];
+        if (hooks && Array.isArray(hooks)) {
+            hooks.forEach(fn => {
+                try { fn(...args); } catch (e) { console.debug('[NotebookLM Tree] Hook error:', e); }
+            });
+        }
+    }
+};
+
 init();

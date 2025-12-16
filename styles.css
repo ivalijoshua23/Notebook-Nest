@@ -81,15 +81,19 @@ body.dark-theme {
 .plugin-btn.toggle-off { opacity: 0.5; }
 
 /* --- SEARCH INPUT --- */
+.plugin-search-area {
+    position: relative;
+    margin-bottom: 8px;
+}
+
 .plugin-search-area input {
     width: 100%;
-    padding: 8px 12px;
+    padding: 8px 36px 8px 12px;
     border-radius: 8px;
     border: 1px solid var(--plugin-border-light);
     background: var(--plugin-bg-input);
     color: inherit;
     outline: none;
-    margin-bottom: 8px;
     box-sizing: border-box;
     font-size: 14px;
     transition: box-shadow 0.2s;
@@ -98,6 +102,34 @@ body.dark-theme {
 .plugin-search-area input:focus {
     box-shadow: 0 1px 4px rgba(0,0,0,0.2);
     border-color: transparent;
+}
+
+/* Search Clear Button */
+.search-clear-btn {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    cursor: pointer;
+    color: var(--plugin-text-secondary);
+    opacity: 0;
+    transition: opacity 0.15s, color 0.15s;
+    pointer-events: none;
+}
+
+.search-clear-btn.visible {
+    opacity: 0.6;
+    pointer-events: auto;
+}
+
+.search-clear-btn.visible:hover {
+    opacity: 1;
+    color: var(--plugin-text);
 }
 
 /* --- TREE NODES --- */
@@ -284,7 +316,7 @@ body.dark-theme {
 }
 
 .plugin-proxy-item[data-match-type="fuzzy"] .proxy-text::after {
-    content: " â‰ˆ";
+    content: " Ã¢â€°Ë†";
     font-weight: bold;
     color: var(--plugin-text-secondary);
     margin-left: 4px;
@@ -436,7 +468,7 @@ body.plugin-focus-mode textarea {
     padding: 0 8px 8px 8px;
     gap: 4px;
 }
-.plugin-task-input-area input {
+.plugin-task-input-area input[type="text"] {
     flex: 1;
     background: var(--plugin-bg-input);
     border: 1px solid var(--plugin-border-light);
@@ -444,6 +476,160 @@ body.plugin-focus-mode textarea {
     border-radius: 4px;
     padding: 4px 8px;
     font-size: 13px;
+}
+
+.plugin-task-input-area .expand-options-btn.active {
+    background-color: var(--plugin-accent-hover);
+    color: var(--plugin-accent);
+}
+
+/* Task Options Panel */
+.plugin-task-options {
+    padding: 8px;
+    margin: 0 8px 8px 8px;
+    background: var(--plugin-bg-hover);
+    border-radius: 6px;
+    border: 1px solid var(--plugin-border-light);
+}
+
+.plugin-task-options-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.plugin-task-options-row:last-child {
+    margin-bottom: 0;
+}
+
+.plugin-task-options-row label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--plugin-text-secondary);
+}
+
+.plugin-task-options-row .option-label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 60px;
+}
+
+.plugin-task-options-row input[type="date"],
+.plugin-task-options-row select {
+    background: var(--plugin-bg-input);
+    border: 1px solid var(--plugin-border-light);
+    color: inherit;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 12px;
+}
+
+.plugin-task-options-row select {
+    min-width: 120px;
+}
+
+.quick-date-btns {
+    display: flex;
+    gap: 4px;
+}
+
+.quick-date-btn {
+    background: transparent;
+    border: 1px solid var(--plugin-border-light);
+    color: var(--plugin-text-secondary);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.2s, color 0.2s;
+}
+
+.quick-date-btn:hover {
+    background: var(--plugin-accent-hover);
+    color: var(--plugin-accent);
+    border-color: var(--plugin-accent);
+}
+
+/* Edit Modal Styles */
+.plugin-edit-modal {
+    min-width: 320px;
+}
+
+.plugin-modal-title {
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--plugin-text);
+    margin-bottom: 16px;
+    text-align: center;
+}
+
+.plugin-edit-field {
+    margin-bottom: 12px;
+}
+
+.plugin-edit-field label {
+    display: block;
+    font-size: 12px;
+    color: var(--plugin-text-secondary);
+    margin-bottom: 4px;
+}
+
+.plugin-edit-field input[type="text"],
+.plugin-edit-field input[type="date"],
+.plugin-edit-field select,
+.plugin-edit-field textarea {
+    width: 100%;
+    background: var(--plugin-bg-input);
+    border: 1px solid var(--plugin-border-light);
+    color: inherit;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 14px;
+    box-sizing: border-box;
+    font-family: inherit;
+}
+
+.plugin-edit-field textarea {
+    resize: vertical;
+    min-height: 60px;
+}
+
+.plugin-edit-field input[type="text"]:focus,
+.plugin-edit-field input[type="date"]:focus,
+.plugin-edit-field select:focus,
+.plugin-edit-field textarea:focus {
+    outline: none;
+    border-color: var(--plugin-accent);
+}
+
+.plugin-edit-date-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.plugin-edit-date-row input[type="date"] {
+    flex: 1;
+    min-width: 140px;
+}
+
+.plugin-edit-date-row .quick-date-btn {
+    padding: 6px 10px;
+    font-size: 12px;
+}
+
+.plugin-edit-date-row .quick-date-btn.clear-date {
+    color: #d93025;
+    border-color: #d93025;
+}
+
+.plugin-edit-date-row .quick-date-btn.clear-date:hover {
+    background: rgba(217, 48, 37, 0.1);
 }
 
 .plugin-task-item {
@@ -537,11 +723,189 @@ body.plugin-focus-mode textarea {
 .plugin-task-btn:hover { background-color: rgba(0,0,0,0.1); color: var(--plugin-text); }
 .plugin-task-btn.del:hover { color: #d93025; background-color: rgba(217, 48, 37, 0.1); }
 
+/* Description button - blue when has description */
+.plugin-task-btn.desc.has-desc {
+    color: var(--plugin-accent);
+    opacity: 1;
+}
+.plugin-task-btn.desc.has-desc:hover {
+    background-color: var(--plugin-accent-hover);
+}
+
+/* Link button - blue when has source link */
+.plugin-task-btn.link.has-link {
+    color: var(--plugin-accent);
+    opacity: 1;
+}
+.plugin-task-btn.link.has-link:hover {
+    background-color: var(--plugin-accent-hover);
+}
+
+/* Description Modal */
+.plugin-desc-modal {
+    min-width: 360px;
+    max-width: 480px;
+}
+
+.plugin-desc-modal .plugin-modal-title {
+    font-size: 14px;
+    margin-bottom: 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--plugin-border-light);
+}
+
+.plugin-desc-source {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--plugin-text-secondary);
+    margin-bottom: 12px;
+    padding: 6px 10px;
+    background: var(--plugin-bg-hover);
+    border-radius: 4px;
+}
+
+.plugin-desc-source .source-icon {
+    display: flex;
+    color: var(--plugin-accent);
+}
+
+.plugin-desc-modal textarea {
+    min-height: 120px;
+}
+
+/* Optional label styling */
+.optional-label {
+    font-size: 11px;
+    color: var(--plugin-text-secondary);
+    font-weight: normal;
+}
+
+/* Source field styling (read-only) */
+.edit-task-source {
+    background: var(--plugin-bg-hover) !important;
+    cursor: default;
+}
+
+/* --- FLOATING TASK BUTTON --- */
+.plugin-floating-task-btn {
+    position: absolute;
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    background: var(--plugin-accent);
+    color: white;
+    border-radius: 50%;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    animation: plugin-fab-appear 0.15s ease-out;
+}
+
+@keyframes plugin-fab-appear {
+    from {
+        opacity: 0;
+        transform: scale(0.8);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+.plugin-floating-task-btn:hover {
+    transform: scale(1.1);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.plugin-floating-task-btn svg {
+    width: 18px;
+    height: 18px;
+    fill: white;
+}
+
 /* --- COMPLETED SECTION --- */
 .plugin-completed-group {
     margin-top: 8px;
     border-top: 1px dashed var(--plugin-border-light);
     padding-top: 4px;
+}
+
+/* --- TASK SECTIONS (Custom collapsible groups) --- */
+.plugin-task-section-group {
+    margin-top: 8px;
+    border-top: 1px dashed var(--plugin-border-light);
+    padding-top: 4px;
+}
+
+.plugin-task-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 8px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--plugin-text-secondary);
+    cursor: pointer;
+    border-radius: 4px;
+    user-select: none;
+}
+
+.plugin-task-section-header:hover {
+    background-color: var(--plugin-bg-hover);
+    color: var(--plugin-text);
+}
+
+.plugin-task-section-header .section-name {
+    font-weight: 500;
+}
+
+.plugin-task-section-header .section-count {
+    font-size: 11px;
+    opacity: 0.7;
+    margin-left: 4px;
+}
+
+.plugin-section-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+.plugin-task-section-header:hover .plugin-section-actions {
+    opacity: 1;
+}
+
+.plugin-section-btn {
+    cursor: pointer;
+    width: 20px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--plugin-text-secondary);
+    border-radius: 3px;
+}
+
+.plugin-section-btn:hover {
+    background-color: var(--plugin-bg-hover);
+    color: var(--plugin-text);
+}
+
+.plugin-section-btn.delete:hover {
+    color: #d93025;
+    background-color: rgba(217, 48, 37, 0.1);
+}
+
+.plugin-task-section-body {
+    padding-left: 8px;
+    width: 100%;
 }
 
 .plugin-completed-header {
@@ -671,4 +1035,44 @@ body.plugin-focus-mode textarea {
 
 .plugin-modal-btn.confirm:hover {
     filter: brightness(1.1);
+}
+
+/* --- V17.9 POP-OUT NOTE BUTTON --- */
+.plugin-popout-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--plugin-text-secondary);
+    transition: background 0.2s, color 0.2s;
+}
+
+.plugin-popout-btn:hover {
+    background: var(--plugin-bg-hover);
+    color: var(--plugin-accent);
+}
+
+/* Active note toolbar popout button */
+.plugin-note-toolbar {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: flex;
+    gap: 4px;
+    z-index: 100;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+.plugin-note-toolbar.visible {
+    opacity: 1;
+}
+
+.plugin-note-toolbar .plugin-popout-btn {
+    background: var(--plugin-bg-hover);
+    width: 28px;
+    height: 28px;
 }

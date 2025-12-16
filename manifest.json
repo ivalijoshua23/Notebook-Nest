@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "NotebookLM Pro Tree",
-  "version": "17.5",
+  "version": "17.9",
   "description": "Tree-structured folder organization for NotebookLM with Optimized Local Storage and Search.",
   "author": "Benju66",
   "permissions": ["activeTab", "scripting", "storage", "unlimitedStorage"],
@@ -20,7 +20,7 @@
   "content_scripts": [
     {
       "matches": ["https://notebooklm.google.com/*"],
-      "js": ["lz-string_min.js", "content.js"],
+      "js": ["lz-string_min.js", "content.js", "note-popout.js"],
       "css": ["styles.css"],
       "run_at": "document_start"
     }
